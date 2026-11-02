@@ -1,0 +1,13 @@
+{
+  "id": "target",
+  "text": "The destination is the interior of the plate; confirm both object identities before carrying.",
+  "task_ids": [
+    "demo/mug-to-plate"
+  ],
+  "applies_when": {},
+  "provides": [],
+  "skill_ids": [
+    "pick",
+    "place"
+  ]
+}

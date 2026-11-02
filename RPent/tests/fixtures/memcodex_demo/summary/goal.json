@@ -1,0 +1,15 @@
+{
+  "id": "goal",
+  "text": "Move the visually identified mug onto the plate. Use current observations for object poses.",
+  "task_ids": [
+    "demo/mug-to-plate"
+  ],
+  "applies_when": {},
+  "provides": [
+    "task"
+  ],
+  "objects": [
+    "mug",
+    "plate"
+  ]
+}

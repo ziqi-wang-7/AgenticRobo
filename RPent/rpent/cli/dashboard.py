@@ -1,0 +1,465 @@
+# Copyright 2026 The RPent Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""CLI orchestration for one long-lived Dashboard Session."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import json
+import shlex
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from rpent.cli.main import (
+    _handoff_message,
+    _serialize_messages,
+)
+from rpent.dashboard.events import RunStartedEvent
+from rpent.evaluation import RunFinalizationContext
+from rpent.memory import MemoryManager
+from rpent.planner.base import build_planner
+from rpent.robots import get_toolkit
+from rpent.utils.config import get_memory_dir
+from rpent.utils.logging import get_logger, init_output_dir
+
+if TYPE_CHECKING:
+    from rpent.dashboard.state import ClaimedTask, DashboardState
+    from rpent.robots.robot_spec import RobotSpec
+    from rpent.utils.daemon import ProcessDaemon
+
+logger = get_logger("agent")
+
+
+def run_dashboard_session(
+    args: argparse.Namespace,
+    robot_spec: RobotSpec,
+    *,
+    parser: argparse.ArgumentParser,
+) -> int:
+    """Run one long-lived Dashboard Session with sequential fresh TaskRuns."""
+    if (
+        robot_spec.is_real_robot
+        and not (robot_spec.dashboard or {}).get("external_env", False)
+        and not robot_spec.supports_human_interactive_exploration
+    ):
+        parser.error(
+            "Physical Dashboard control requires a robot runtime with human confirmation."
+        )
+    from rpent.dashboard.server import DashboardServer
+    from rpent.dashboard.session import DashboardSessionController
+    from rpent.dashboard.state import DashboardState
+    from rpent.utils.config import get_repo_root
+
+    dashboard_spec = robot_spec.dashboard
+    if dashboard_spec is None:
+        parser.error(f"robot {robot_spec.name!r} does not support Dashboard control")
+    runtime_components = tuple(
+        component
+        for component in dashboard_spec["runtime_components"]
+        if not component.get("planners") or args.planner in component["planners"]
+    )
+    dashboard_spec = {**dashboard_spec, "runtime_components": runtime_components}
+    shared_components = {
+        component["name"]
+        for component in runtime_components
+        if component["scope"] == "shared"
+    }
+    unique_components = {
+        component["name"]
+        for component in runtime_components
+        if component["scope"] == "unique"
+    }
+
+    if getattr(args, "env_endpoint", None) is not None and not (
+        dashboard_spec.get("external_env", False)
+        or (
+            robot_spec.is_real_robot
+            and robot_spec.supports_human_interactive_exploration
+        )
+    ):
+        parser.error(
+            "Dashboard task control cannot use --env-endpoint because each "
+            "TaskRun requires a fresh owned env_server"
+        )
+    if dashboard_spec.get("external_env", False) and not getattr(
+        args, "env_endpoint", None
+    ):
+        parser.error(
+            "--env-endpoint is required for this external-environment Dashboard"
+        )
+    if args.planner == "api" and not args.model:
+        parser.error("--model is required when --planner=api")
+
+    if args.output_dir is None:
+        timestamp = datetime.now().strftime("%Y%m%d-%H:%M:%S")
+        session_root = get_repo_root() / "logs" / f"{timestamp}_dashboard_session"
+    else:
+        session_root = Path(args.output_dir)
+    session_root = init_output_dir(session_root, verbose=args.verbose)
+    logger.info("physical agent cmd: %s", shlex.join([sys.executable, *sys.argv]))
+
+    state = DashboardState(
+        output_dir=session_root,
+        dashboard_spec=dashboard_spec,
+    )
+    dashboard_server = DashboardServer(
+        host=args.dashboard_host,
+        port=args.dashboard_port,
+        language=args.dashboard_language,
+        state=state,
+        planner=args.planner,
+        model=args.model,
+        base_url=args.base_url,
+    )
+    dashboard_url = dashboard_server.start()
+    print(f"Dashboard: {dashboard_url}", flush=True)
+    logger.info("Dashboard: %s", dashboard_url)
+
+    # Shared robot services may validate memory before a task is claimed.
+    # Robots with a preparation hook select memory at each task boundary instead.
+    if (
+        robot_spec.prepare_memory is None
+        and not getattr(args, "explore", False)
+        and getattr(args, "memory_profile", "hf") == "hf"
+    ):
+        if args.memory_repo is not None:
+            from rpent.memory.source import prepare_explicit_source
+
+            args.memory_dir = str(
+                prepare_explicit_source(args.memory_repo, robot_spec.name)
+            )
+        else:
+            MemoryManager(get_memory_dir(robot_spec.name)).sync(
+                remote_repo=robot_spec.memory_repo_id,
+            )
+
+    controller = DashboardSessionController(
+        state=state,
+        start_shared=lambda: robot_spec.init_runtime(
+            args,
+            session_root,
+            state,
+            shared_components,
+        ),
+        run_task=lambda claimed, shared: _run_dashboard_task(
+            args=args,
+            robot_spec=robot_spec,
+            state=state,
+            claimed=claimed,
+            shared_runtime_kwargs=shared,
+            unique_components=unique_components,
+            session_root=session_root,
+        ),
+    )
+    try:
+        controller.run()
+        if state.session_state == "fatal":
+            logger.error(
+                "Dashboard Session is fatal. Still serving at %s; "
+                "press Ctrl+C to stop.",
+                dashboard_url,
+            )
+            threading.Event().wait()
+    except KeyboardInterrupt:
+        state.request_shutdown()
+    return 0
+
+
+def _run_dashboard_task(
+    *,
+    args: argparse.Namespace,
+    robot_spec: RobotSpec,
+    state: DashboardState,
+    claimed: ClaimedTask,
+    shared_runtime_kwargs: dict[str, Any],
+    unique_components: set[str],
+    session_root: Path,
+) -> str | None:
+    """Execute one fresh Dashboard TaskRun against Session-owned services."""
+    human_interactive_run = (
+        robot_spec.is_real_robot and robot_spec.supports_human_interactive_exploration
+    )
+    task_args = copy.copy(args)
+    for name, value in claimed.request.items():
+        setattr(task_args, name, value)
+    if task_args.explore and not robot_spec.supports_exploration:
+        raise ValueError(f"--explore is not supported for robot {robot_spec.name!r}")
+    task_args.output_dir = str(claimed.output_dir)
+    run_config = robot_spec.parse_config(task_args)
+    from rpent.memory.loading import prepare_run_memory
+
+    prepare_run_memory(task_args, robot_spec, run_config)
+    output_dir = init_output_dir(run_config.output_dir, verbose=args.verbose)
+
+    recipe_tag = run_config.recipe_tag
+    finish_result = None
+    messages: list[dict] = []
+    stats: dict = {}
+    agent_error: str | None = None
+    task_daemons: list[ProcessDaemon] = []
+    recipe_path = ""
+    started = time.time()
+    solved = False
+    memory_manager = None
+    environment_success = None
+    try:
+        task_daemons, task_runtime_kwargs = robot_spec.init_runtime(
+            task_args,
+            output_dir,
+            state,
+            unique_components,
+        )
+        if not state.task_replacement_requested:
+            runtime_kwargs = {
+                **task_runtime_kwargs,
+                **shared_runtime_kwargs,
+            }
+            prompt_vars = {**run_config.prompt_vars, "output_dir": output_dir}
+            session_message = robot_spec.prompts.render("user", variables=prompt_vars)
+            sessions = max(
+                1,
+                int(getattr(task_args, "explore_sessions", 1) or 1),
+            )
+            if not getattr(task_args, "explore", False):
+                sessions = 1
+            if not state.task_replacement_requested:
+                state.emit(RunStartedEvent())
+            for session_number in range(1, sessions + 1):
+                if (
+                    state.task_replacement_requested
+                    or state.task_finalization_cancelled
+                ):
+                    break
+                if session_number > 1:
+                    logger.info(
+                        "=== handing off to agent %d/%d ===",
+                        session_number,
+                        sessions,
+                    )
+                    session_message = _handoff_message(
+                        output_dir,
+                        session_number,
+                        sessions,
+                        robot_name=args.robot_name,
+                    )
+                system_prompt = robot_spec.prompts.render(
+                    "system",
+                    variables={
+                        **prompt_vars,
+                        "session_number": session_number,
+                        "session_max": sessions,
+                    },
+                )
+                state_output_dir = output_dir
+                if getattr(task_args, "explore", False):
+                    state_output_dir = (
+                        output_dir / "sessions" / f"session_{session_number:03d}"
+                    )
+                    state.begin_planner_session(
+                        video_path=state_output_dir / "episode.mp4",
+                    )
+                if robot_spec.supports_exploration:
+                    operator_kwargs = {}
+                    if human_interactive_run:
+                        from rpent.tools.human_in_the_loop import HumanInTheLoopInput
+
+                        state.operator_exploration = bool(task_args.explore)
+                        state.operator = HumanInTheLoopInput(
+                            interactive=True, on_change=state.operator_changed
+                        )
+                        operator_kwargs["operator_input"] = state.operator
+                    toolkit = get_toolkit(
+                        args.robot_name,
+                        runtime_kwargs=runtime_kwargs,
+                        dashboard_events=state,
+                        config=run_config,
+                        mode="exploration" if task_args.explore else "evaluation",
+                        attempts_per_session=getattr(
+                            task_args, "explore_attempts_per_session", 0
+                        ),
+                        state_output_dir=state_output_dir,
+                        **operator_kwargs,
+                    )
+                else:
+                    toolkit = get_toolkit(
+                        args.robot_name,
+                        runtime_kwargs=runtime_kwargs,
+                        dashboard_events=state,
+                        config=run_config,
+                    )
+                solved = False
+                state.bind_toolkit(toolkit)
+                memory_manager = toolkit.memory
+                try:
+                    planner = build_planner(
+                        task_args.planner,
+                        output_dir=output_dir,
+                        recipe_tag=recipe_tag,
+                        robot_name=args.robot_name,
+                        base_url=args.base_url,
+                        model=task_args.model,
+                        memory_dir=run_config.prompt_vars.get("memory_dir"),
+                        max_tokens=args.max_tokens,
+                        planner_timeout_s=args.planner_timeout_s,
+                        reasoning_effort=args.reasoning_effort,
+                        claude_code_max_budget_usd=args.claude_code_max_budget_usd,
+                        dashboard_events=state,
+                        no_images=args.no_images,
+                    )
+                    result = planner.solve(
+                        system_prompt=system_prompt,
+                        user_message=session_message,
+                        toolkit=toolkit,
+                        max_turns=args.max_turns,
+                        dashboard_interaction=state,
+                    )
+                    finish_result = result.finish_result
+                    messages += result.messages
+                    stats = result.stats
+                    agent_error = result.error
+                    if human_interactive_run and toolkit.direct_verdict_requested:
+                        finish_result = toolkit.finalize_direct_verdict()
+                        if agent_error:
+                            stats["planner_error_at_operator_verdict"] = agent_error
+                    if robot_spec.supports_exploration:
+                        solved = bool(toolkit.solved())
+                        if solved:
+                            recipe_path = (
+                                toolkit.write_recipe(recipe_tag) or recipe_path
+                            )
+                finally:
+                    try:
+                        state.unbind_toolkit(toolkit)
+                        if robot_spec.finalize_run is not None:
+                            environment_success = bool(toolkit.solved())
+                            solved = environment_success
+                    finally:
+                        toolkit.close()
+                if (
+                    solved
+                    or state.task_replacement_requested
+                    or (finish_result or {}).get("operator_finished")
+                ):
+                    break
+                if agent_error:
+                    if session_number < sessions and "timed out" in agent_error.lower():
+                        logger.warning(
+                            "session %d/%d timed out; continuing with a fresh handoff",
+                            session_number,
+                            sessions,
+                        )
+                        continue
+                    break
+    except KeyboardInterrupt:
+        state.request_shutdown()
+        agent_error = "Dashboard interrupted by operator."
+    except Exception as exc:
+        logger.error("EXCEPTION in Dashboard TaskRun %04d: %s", claimed.number, exc)
+        agent_error = str(exc)
+    finally:
+        if human_interactive_run and state.operator is not None:
+            state.operator.close()
+            state.operator = None
+        cleanup_errors: list[str] = []
+        if recipe_path:
+            logger.info("recipe: %s", recipe_path)
+        else:
+            logger.info("recipe: not written (cell unsolved)")
+        for daemon in reversed(task_daemons):
+            try:
+                daemon.stop()
+            except Exception as exc:
+                cleanup_errors.append(f"robot cleanup failed: {exc}")
+        if cleanup_errors:
+            cleanup_error = "; ".join(cleanup_errors)
+            if agent_error is None:
+                agent_error = cleanup_error
+            else:
+                logger.warning("%s", cleanup_error)
+
+        transcript_path = output_dir / f"transcript_{run_config.recipe_tag}.json"
+        record = {
+            **run_config.task_desc,
+            "model": task_args.model,
+            "elapsed_s": round(time.time() - started, 1),
+            "finish": finish_result,
+            "environment_success": environment_success,
+            "stats": stats,
+            "messages": _serialize_messages(messages),
+        }
+        try:
+            with open(transcript_path, "a") as transcript_file:
+                json.dump(record, transcript_file, indent=2, default=str)
+        except Exception as exc:
+            logger.warning(
+                "failed to write TaskRun transcript %s: %s", transcript_path, exc
+            )
+        init_output_dir(session_root, verbose=args.verbose)
+
+    if (
+        getattr(task_args, "explore", False)
+        and getattr(task_args, "auto_merge_memory", False)
+        and not agent_error
+        and not state.task_finalization_cancelled
+        and memory_manager is not None
+    ):
+        try:
+            merge_result = memory_manager.merge_memory(
+                cell_tag=run_config.recipe_tag,
+                run_state_dir=run_config.output_dir,
+                solved=solved,
+            )
+            if merge_result:
+                logger.info("run finalized: %s", merge_result)
+        except Exception as exc:
+            warning = f"memory finalization failed: {type(exc).__name__}: {exc}"
+            logger.warning("%s", warning)
+            state.report_task_warning(warning)
+
+    if robot_spec.finalize_run is not None:
+        try:
+            robot_spec.finalize_run(
+                RunFinalizationContext(
+                    output_dir=Path(output_dir),
+                    robot_name=robot_spec.name,
+                    task_desc=dict(run_config.task_desc),
+                    environment_success=environment_success,
+                    agent_error=agent_error,
+                    elapsed_s=time.time() - started,
+                    planner=args.planner,
+                    model=args.model,
+                    reasoning_effort=args.reasoning_effort,
+                    max_turns=args.max_turns,
+                    planner_timeout_s=args.planner_timeout_s,
+                    finish_result=dict(finish_result)
+                    if finish_result is not None
+                    else None,
+                    stats=dict(stats),
+                )
+            )
+        except Exception as exc:
+            finalization_error = (
+                f"result finalization failed: {type(exc).__name__}: {exc}"
+            )
+            if agent_error:
+                logger.warning("%s", finalization_error)
+            else:
+                agent_error = finalization_error
+    return agent_error

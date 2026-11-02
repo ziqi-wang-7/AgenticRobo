@@ -1,0 +1,13 @@
+# Local environments, credentials, and generated artifacts.
+.venv/
+.env
+.env.*
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+logs/
+/RPent/repro/assets/
+/RPent/repro/vendor/

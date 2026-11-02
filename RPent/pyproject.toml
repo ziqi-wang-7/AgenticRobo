@@ -1,0 +1,276 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rpent"
+version = "0.0.0"
+authors = [{ name = "RPent Contributors" }]
+description = "Embodied agent framework for coordinating high-level reasoning and robot skills"
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = ">=3.10,<3.13"
+license = {file = "LICENSE"}
+keywords = [
+    "embodied-intelligence",
+    "large-language-models",
+    "agent-framework",
+]
+classifiers = [
+    #   2 - Pre-Alpha
+    #   3 - Alpha
+    #   4 - Beta
+    #   5 - Production/Stable
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: GPU :: NVIDIA CUDA :: 12 :: 12.4",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+]
+
+dependencies = [
+    # Upgrade together after validating request budgets and failed-request accounting.
+    "pydantic-ai-slim[anthropic,openai,cli]==2.53.0",
+    "pydantic-ai-harness==0.53.0",
+    "pydantic>=2",
+    "tomli>=2; python_version < '3.11'",
+    "fastapi>=0.110",
+    "uvicorn>=0.27",
+    "httpx>=0.27",
+    "jsonschema>=4.18",
+    "claude-agent-sdk>=0.1.60",
+    "openai-codex>=0.1.0b3",
+    "mcp>=1.23.0,<2.0.0",
+    "huggingface_hub>=0.24",
+    "prompt-toolkit>=3.0.48",
+    "numpy",
+    "scipy",
+    "imageio>=2.0",
+    "PyYAML>=6.0",
+]
+
+[project.scripts]
+rpent = "rpent.cli.main:main"
+rpent-memory = "rpent.cli.memory:main"
+rpent-check-llm = "rpent.cli.check_llm:main"
+rpent-flywheel = "rpent.flywheel.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/RLinf/RPent"
+Repository = "https://github.com/RLinf/RPent"
+Documentation = "https://rpent.readthedocs.io/en/latest/"
+"Bug Report" = "https://github.com/RLinf/RPent/issues"
+
+[project.optional-dependencies]
+memcodex = [
+    "tiktoken>=0.7",
+]
+test = [
+    "coverage",
+    "pytest",
+    "pytest-timeout",
+    "omegaconf",
+    "gymnasium",
+]
+rlinf = [
+    "rlinf @ git+https://github.com/RLinf/RLinf.git@release/v0.4",
+]
+sam3 = [
+    "sam3 @ git+https://github.com/RLinf/sam3.git@main",
+    "einops>=0.8.0",
+    "pycocotools",
+    "torch",
+    "torchvision",
+    "pillow>=10",
+]
+molmo = [
+    # Molmo's remote code uses transformers' video-processing API, which the
+    # LIBERO extra cannot supply: OpenPI pins transformers==4.53.2 exactly, and
+    # 4.53.2 has no transformers.video_utils.make_batched_metadata. Install this
+    # into its own environment and point the grounder at it over RPC.
+    "transformers>=4.57",
+    "torch",
+    "torchvision",
+    "pillow>=10",
+]
+libero = [
+    "rpent[rlinf,sam3]",
+    "rpent-openpi @ git+https://github.com/RLinf/openpi.git@rpent",
+    "rpent-libero @ git+https://github.com/RLinf/LIBERO.git@rpent",
+    # MuJoCo 3.4+ changes LIBERO settling, misplacing objects and reducing task success; see https://github.com/RLinf/RLinf/issues/1460.
+    "mujoco==3.3.0",
+]
+libero-pro = [
+    "rpent[libero]",
+    "rpent-liberopro @ git+https://github.com/RLinf/LIBERO-PRO.git@rpent",
+]
+libero-plus = [
+    # LIBERO-plus requires robosuite<1.5, so it cannot inherit the standard LIBERO extra.
+    "rpent[rlinf,sam3]",
+    "rpent-openpi @ git+https://github.com/RLinf/openpi.git@rpent",
+    "rlinf-liberoplus",
+    "mujoco==3.3.0",
+    "h5py",
+]
+franka = [
+    "rpent[rlinf]",
+    # Keep this list aligned with requirements/embodied/envs/franka.txt at the
+    # RLinf revision pinned by the rlinf extra.
+    "pyyaml",
+    "rospkg",
+    "pyrealsense2; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "empy==3.3.4",
+    "gymnasium==0.29.1",
+    "pyquaternion",
+    "opencv-python",
+    "defusedxml",
+    "pyspacemouse>=2.0.0",
+    "pymodbus>=3.0,<4.0",
+    "pyserial",
+    "imageio[ffmpeg]",
+    "evdev",
+    "numpy<2",
+    # PyArrow 26 requires NumPy >=2 at import time, incompatible with Franka.
+    "pyarrow<26.0.0",
+    "pyzmq",
+    "websockets",
+    "rpent-openpi @ git+https://github.com/RLinf/openpi.git@rpent",
+    "franky-control @ https://github.com/Brunch-Life/franky/releases/download/wheels-libfranka-0.19.0/franky_control-1.1.3-cp310-cp310-manylinux_2_28_x86_64.whl ; python_version == '3.10' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "franky-control @ https://github.com/Brunch-Life/franky/releases/download/wheels-libfranka-0.19.0/franky_control-1.1.3-cp311-cp311-manylinux_2_28_x86_64.whl ; python_version == '3.11' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "franky-control @ https://github.com/Brunch-Life/franky/releases/download/wheels-libfranka-0.19.0/franky_control-1.1.3-cp312-cp312-manylinux_2_28_x86_64.whl ; python_version == '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "matplotlib>=3.8",
+    "pillow>=10",
+]
+robocasa = [
+    "rpent[rlinf]",
+    "rpent-robocasa365 @ git+https://github.com/RLinf/robocasa.git@rpent",
+    "rlinf-rldx @ git+https://github.com/RLinf/RLDX-1.git@rpent",
+    "robosuite @ git+https://github.com/RLinf/robosuite.git@rpent",
+]
+flywheel = [
+    "lerobot>=0.3.3,<0.4",
+]
+yam = [
+    # Install the fixed RLinf YAM revision and i2rt SDK from the YAM guide.
+    # i2rt 1.1.2 requires click<8.2; huggingface-hub 2.x requires click>=8.4.
+    "huggingface_hub>=0.24,<1",
+    "omegaconf>=2.3,<3",
+    "mujoco>=3.2,<4",
+    "pyrealsense2>=2.55,<3",
+    "imageio-ffmpeg",
+]
+robotwin = [
+    "rpent[rlinf]",
+    "rlinf-robotwin-runtime==0.1.1",
+    "rlinf-lingbotvla==0.1.1",
+    "nvidia-curobo @ git+https://github.com/NVlabs/curobo.git@v0.7.8",
+]
+
+robodojo = [
+    "rpent[robodojo-sim,sam3]",
+    "rpent-openpi @ git+https://github.com/RLinf/openpi.git@rpent",
+]
+robodojo-sim = [
+    # Supplies both the simulator adapter and the OpenPI policy configuration.
+    "rlinf @ git+https://github.com/littleZ05/RLinf.git@rpent/robodojo",
+    # RLinf organization fork; use a versioned release once it is published.
+    "rlinf-robodojo-runtime @ git+https://github.com/RLinf/RoboDojo.git@rpent",
+    # uv reads build overrides only from the root project.
+    "nvidia-curobo[cu12] @ git+https://github.com/yuechen0614/curobo.git@main",
+]
+
+[tool.uv]
+prerelease = "allow"
+
+# `robodojo-sim` needs eight overrides for its simulator stack; they live in
+# requirements/robodojo-override.txt so every other robot keeps resolving the
+# versions it was validated against. Pass them explicitly:
+#
+#   uv pip install -e ".[robodojo]" --override requirements/robodojo-override.txt
+
+# Each robot extra pulls a separately pinned VLA runtime whose Torch,
+# Transformers, Tokenizers, or Diffusers versions are mutually incompatible.
+conflicts = [
+    [
+        { extra = "franka" },
+        { extra = "libero" },
+    ],
+    [
+        { extra = "franka" },
+        { extra = "libero-pro" },
+    ],
+    [
+        { extra = "franka" },
+        { extra = "libero-plus" },
+    ],
+    [
+        { extra = "franka" },
+        { extra = "robocasa" },
+    ],
+    [
+        { extra = "franka" },
+        { extra = "robotwin" },
+    ],
+    [
+        { extra = "robocasa" },
+        { extra = "robotwin" },
+    ],
+]
+
+[tool.uv.extra-build-dependencies]
+# This key is a package name, so the pin is global to every extra. RoboTwin's
+# cuRobo v0.7.8 needs a statically known build Torch, and `match-runtime`
+# cannot supply one. RoboDojo's fork does not compile Torch extensions at all
+# (CUROBO_USE_PYBIND defaults to 0), so its runtime Torch does not have to
+# match a build-time one: it stays on 2.7.0 through
+# requirements/robodojo-override.txt while this build dependency stays 2.7.1.
+nvidia-curobo = ["torch==2.7.1"]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+# robots is a top-level package; without it, non-editable installations
+# leave the CLI unable to import any backend. The globs also cover every
+# per-robot subpackage (robots.yam.*, robots.robodojo.*, ...).
+include = ["rpent*", "robots", "robots.*"]
+exclude = ["tests*", "docs*", "examples*", "docker*", "toolkits*"]
+
+[tool.setuptools.package-data]
+"rpent.dashboard" = ["*.html", "static/*.css", "static/*.js"]
+"robots.yam" = ["config/*.yaml", "guides/*.md"]
+
+[tool.pytest.ini_options]
+addopts = ["--import-mode=importlib"]
+pythonpath = ["."]
+timeout = 60
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+target-version = "py311"
+
+[tool.ruff.lint]
+isort = {known-first-party = ["rpent"]}
+select = ["C", "E", "F", "I", "W", "CPY001", "RUF013", "UP006", "PERF102", "PLC1802", "PLC0208", "DOC102", "DOC202", "DOC403", "DOC502"]
+ignore = [
+    "C901", # "complex-structure"
+    "E501", # "line-too-long"
+    "E741", # "ambiguous-variable-name"
+    "D100", # "Missing docstring in public module"
+    "D104", # "Missing docstring in public package"
+    "D203", # "incorrect-blank-line-before-class", conflict with D211,
+    "D213", # "multi-line-summary-second-line", conflict with D212
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
