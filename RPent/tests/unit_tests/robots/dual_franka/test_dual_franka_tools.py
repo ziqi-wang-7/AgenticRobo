@@ -1,0 +1,845 @@
+# Copyright 2026 The RPent Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Offline dual-Franka primitive and state-capture tests."""
+
+from __future__ import annotations
+
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from robots.dual_franka import get_robot_spec, perception
+from robots.dual_franka.perception import (
+    back_project,
+    load_calibration_bundle,
+    segment,
+)
+from robots.dual_franka.tasks import CLEAN_DESK_VLA_PROMPT
+from robots.dual_franka.toolkit import DualFrankaToolkit
+from robots.dual_franka.tools import (
+    DualFrankaPrimitives,
+    coerce_arm,
+    dump_state,
+    view_env_state,
+)
+from robots.franka.runtime_config import set_robot_config_path
+from robots.franka.tools import view_camera_meta
+from rpent.dashboard.events import NullDashboardEventSink, StepRecordEvent
+from rpent.dashboard.state import DashboardState
+from rpent.memory import MemoryManager
+from rpent.planner.utils.http_mcp_server import mcp_result
+from rpent.session import EnvState
+
+
+class FakeEnv:
+    def __init__(self) -> None:
+        self.resets = 0
+        self.moves: list[tuple[str, np.ndarray]] = []
+        self.rotations: list[tuple[str, np.ndarray]] = []
+        self.grippers: list[tuple[str, bool]] = []
+        self.chunks: list[np.ndarray] = []
+
+    def reset(self):
+        self.resets += 1
+        return {"ok": True}
+
+    def move_delta(self, arm, value):
+        self.moves.append((arm, np.asarray(value)))
+        return {"ok": True, "arm": arm}
+
+    def rotate_delta(self, arm, value):
+        self.rotations.append((arm, np.asarray(value)))
+        return {"ok": True, "arm": arm}
+
+    def set_gripper(self, arm, *, open: bool):
+        self.grippers.append((arm, open))
+        return {"ok": True, "arm": arm, "open": open}
+
+    def recover_joint_posture(self, *, reason="", return_to_start=True):
+        return {
+            "ok": True,
+            "reason": reason,
+            "return_to_start": return_to_start,
+        }
+
+    def get_observation(self):
+        return {
+            "main_images": np.zeros((8, 8, 3), dtype=np.uint8),
+            "extra_view_images": np.ones((2, 8, 8, 3), dtype=np.uint8),
+            "main_depths": np.ones((8, 8), dtype=np.float32),
+            "extra_view_depths": np.ones((2, 8, 8), dtype=np.float32) * 2,
+            "d455_images": np.ones((8, 8, 3), dtype=np.uint8) * 3,
+            "d455_depths": np.ones((8, 8), dtype=np.float32) * 4,
+            "raw_camera_frames": {
+                "base_0_rgb": np.full((10, 12, 3), 7, dtype=np.uint8),
+            },
+            "raw_camera_depths": {
+                "base_0_rgb": np.full((10, 12), 9, dtype=np.float32),
+            },
+            "states": np.zeros(20, dtype=np.float32),
+        }
+
+    def get_robot_state(self):
+        return {
+            "left_arm": {
+                "tcp_pose": [0.5, -0.2, 0.5, 0.0, 0.0, 0.0, 1.0],
+                "gripper_open": True,
+            },
+            "right_arm": {
+                "tcp_pose": [0.5, 0.2, 0.5, 0.0, 0.0, 0.0, 1.0],
+                "gripper_open": True,
+            },
+        }
+
+    def get_camera_meta(self):
+        return {
+            "cameras": {"left_wrist_0_rgb": {"serial": "left", "type": "zed"}},
+            "observation_camera_map": {
+                "main": "left_wrist_0_rgb",
+                "extra_0": "base_0_rgb",
+                "extra_1": "right_wrist_0_rgb",
+            },
+            "agent_observation": {
+                "inline_cameras": ["d455"],
+                "auxiliary_cameras": ["left_wrist", "base", "right_wrist"],
+            },
+            "projection_views": {
+                "base": {"raw_key": "base_0_rgb", "calibration_key": "base_camera"},
+                "d455": {"raw_key": "d455_rgb", "calibration_key": "d455_camera"},
+            },
+        }
+
+    def chunk_step(self, actions):
+        self.chunks.append(np.asarray(actions))
+        return {"terminated": False, "truncated": False}
+
+
+class FakeModel:
+    def __init__(self, expected_prompt="hand over the cube") -> None:
+        self.expected_prompt = expected_prompt
+
+    def predict(self, observation, options=None):
+        assert observation["task_descriptions"] == self.expected_prompt
+        assert options == {"mode": "eval"}
+        return np.zeros((2, 20), dtype=np.float32)
+
+
+class FakeSam3Client:
+    def segment(self, image, *, text_prompt=None, point=None, min_score=0.2):
+        assert text_prompt == "white cardboard box interior"
+        assert point is None
+        mask = np.zeros((8, 8), dtype=bool)
+        mask[3:6, 3:6] = True
+        return type(
+            "FakeSam3Result",
+            (),
+            {
+                "found": True,
+                "score": 0.91,
+                "box": [3.0, 3.0, 5.0, 5.0],
+                "mask": mask,
+                "mask_shape": mask.shape,
+                "reason": None,
+            },
+        )()
+
+
+class BoundaryEnv(FakeEnv):
+    def __init__(self) -> None:
+        super().__init__()
+        self._right_open = True
+        self._right_z = 0.5
+
+    def get_robot_state(self):
+        return {
+            "left_arm": {
+                "tcp_pose": [0.5, -0.2, 0.5, 0.0, 0.0, 0.0, 1.0],
+                "gripper_open": True,
+            },
+            "right_arm": {
+                "tcp_pose": [0.5, 0.2, self._right_z, 0.0, 0.0, 0.0, 1.0],
+                "gripper_open": self._right_open,
+            },
+        }
+
+    def chunk_step(self, actions):
+        self.chunks.append(np.asarray(actions))
+        self._right_open = False
+        self._right_z += 0.08
+        return {"terminated": False, "truncated": False}
+
+
+def _primitives(env: FakeEnv, *, model=None, check_cancelled=lambda: None):
+    return DualFrankaPrimitives(
+        env=env,
+        model=model,
+        task_description="default task",
+        vla_instruction=CLEAN_DESK_VLA_PROMPT,
+        check_cancelled=check_cancelled,
+    )
+
+
+def _tool_names(toolkit: DualFrankaToolkit) -> set[str]:
+    return set(toolkit._tools)
+
+
+def test_toolkit_exploration_tools_are_opt_in(
+    tmp_path: Path, dual_franka_robot_config: Path
+):
+    set_robot_config_path(dual_franka_robot_config)
+    base_kwargs = {
+        "env": FakeEnv(),
+        "model": None,
+        "task_description": "default task",
+    }
+    evaluation = DualFrankaToolkit(
+        runtime_kwargs=dict(base_kwargs),
+        dashboard_events=NullDashboardEventSink(),
+        memory=MemoryManager(tmp_path / "eval-memory"),
+        mode="evaluation",
+        state_output_dir=tmp_path / "eval-state",
+    )
+    exploration = DualFrankaToolkit(
+        runtime_kwargs=dict(base_kwargs),
+        dashboard_events=NullDashboardEventSink(),
+        memory=MemoryManager(
+            tmp_path / "explore-memory",
+            memory_access="inbox_write",
+            inbox_cell_tag="dual_franka_t4",
+        ),
+        mode="exploration",
+        attempts_per_session=2,
+        state_output_dir=tmp_path / "explore-state",
+    )
+
+    assert evaluation.state.load("recording_fingerprint.json", step=None)[
+        "robot_config"
+    ]
+    assert "request_scene_reset" not in _tool_names(evaluation)
+    assert "request_operator_verdict" in _tool_names(evaluation)
+    refused_eval = evaluation.execute_tool(
+        "finish", {"status": "success", "summary": "not confirmed"}
+    )
+    assert refused_eval.data["error"] == "finish refused"
+    assert refused_eval.data.get("_finish", False) is False
+    evaluation._read_operator_line = lambda prompt: "success checked by operator"
+    evaluation.execute_tool("request_operator_verdict", {})
+    accepted_eval = evaluation.execute_tool(
+        "finish", {"status": "success", "summary": "confirmed"}
+    )
+    assert accepted_eval.data.get("_finish", False) is True
+    assert evaluation.solved()
+    assert "request_scene_reset" in _tool_names(exploration)
+    assert "request_operator_verdict" in _tool_names(exploration)
+
+    refused = exploration.execute_tool(
+        "finish",
+        {"status": "success", "summary": "agent thinks done"},
+    )
+    assert refused.data["error"].startswith("finish refused")
+    assert refused.data.get("_finish", False) is False
+
+    exploration._read_operator_line = lambda prompt: "done"
+    exploration.execute_tool("request_scene_reset", {"reason": "prepare"})
+    exploration._read_operator_line = lambda prompt: "success"
+    exploration.execute_tool("request_operator_verdict", {})
+    accepted = exploration.execute_tool(
+        "finish",
+        {"status": "success", "summary": "operator accepted"},
+    )
+    assert accepted.data.get("_finish", False) is True
+    assert accepted.data["operator_verdict"] == "success"
+
+
+def test_scene_reset_waits_for_operator_then_resets_robot(
+    tmp_path: Path, dual_franka_robot_config: Path
+):
+    set_robot_config_path(dual_franka_robot_config)
+    env = FakeEnv()
+    exploration = DualFrankaToolkit(
+        runtime_kwargs={
+            "env": env,
+            "model": None,
+            "task_description": "default task",
+        },
+        dashboard_events=NullDashboardEventSink(),
+        memory=MemoryManager(
+            tmp_path / "explore-memory",
+            memory_access="inbox_write",
+            inbox_cell_tag="dual_franka_t4",
+        ),
+        mode="exploration",
+        attempts_per_session=2,
+        state_output_dir=tmp_path / "explore-state",
+    )
+    exploration._read_operator_line = lambda prompt: "done"
+
+    result = exploration.execute_tool(
+        "request_scene_reset",
+        {
+            "reason": "retry with restored layout",
+            "expected_scene_state": "objects back at the starting positions",
+        },
+    ).data
+
+    assert env.resets == 1
+    assert result["result"]["robot_reset"] == {"ok": True}
+    assert exploration._attempt == 1
+    assert result["result"]["scene_reset_confirmed"] is True
+    assert "robot posture reset" in result["result"]["notice"]
+
+
+def test_arm_and_vec3_validation_and_motion_forwarding():
+    env = FakeEnv()
+    primitives = _primitives(env)
+
+    primitives.move_delta("left", [0.01, 0.0, -0.02])
+    primitives.rotate_delta("right", [0.0, 0.0, 0.1])
+    primitives.open_gripper("left")
+    primitives.close_gripper("right")
+
+    assert env.moves[0][0] == "left"
+    np.testing.assert_allclose(env.moves[0][1], [0.01, 0.0, -0.02])
+    assert env.rotations[0][0] == "right"
+    assert env.grippers == [("left", True), ("right", False)]
+
+    assert coerce_arm("LEFT") == "left"
+    with pytest.raises(ValueError, match="left.*right"):
+        coerce_arm("both")
+
+
+def test_dump_state_saves_three_camera_artifacts(tmp_path: Path):
+    env = FakeEnv()
+    primitives = _primitives(env)
+    state = EnvState(tmp_path)
+
+    record = dump_state(
+        primitives,
+        state,
+        command={"action": "move_delta"},
+        result={"ok": True},
+        elapsed_s=0.2,
+    )
+
+    assert record.artifacts == {
+        "left_wrist.png",
+        "left_wrist_depth.npy",
+        "base.png",
+        "base_depth.npy",
+        "right_wrist.png",
+        "right_wrist_depth.npy",
+        "d455.png",
+        "d455_depth.npy",
+        "camera_meta.json",
+    }
+    output_native = view_env_state(state=state)
+    output = output_native.data
+    assert output_native.images == [state.load_bytes("d455.png")]
+    assert output["artifact_images"] == ["base", "d455", "left_wrist", "right_wrist"]
+    assert output["image_block_order"] == ["d455"]
+    np.testing.assert_array_equal(state.load("base.png"), 7)
+    np.testing.assert_array_equal(state.load("base_depth.npy"), 9)
+    camera_meta = view_camera_meta(state=state).data["camera_meta"]
+    assert camera_meta["observation_camera_map"]["main"] == "left_wrist_0_rgb"
+
+
+def test_dashboard_discovers_dual_franka_camera_artifacts(tmp_path: Path):
+    state = EnvState(tmp_path / "state")
+    record = dump_state(
+        _primitives(FakeEnv()), state, command=None, result=None, elapsed_s=None
+    )
+    dashboard = DashboardState(
+        output_dir=tmp_path, dashboard_spec=get_robot_spec().dashboard
+    )
+    dashboard.emit(StepRecordEvent(record, state))
+
+    for camera in ("base", "d455", "left_wrist", "right_wrist"):
+        assert dashboard.frame(camera) == state.load_bytes(f"{camera}.png")
+    assert dashboard.frame("d455_depth") is None
+
+
+def test_view_env_state_emits_multimodal_image_blocks(tmp_path: Path):
+    env = FakeEnv()
+    primitives = _primitives(env)
+    state = EnvState(tmp_path)
+
+    dump_state(primitives, state, command=None, result=None, elapsed_s=None)
+    output_native = view_env_state(state=state)
+    output = output_native.data
+    # Routine planner snapshots inline only D455, while auxiliary camera
+    # artifacts stay available through returned paths/read_image.
+    assert output["images"] == ["d455"]
+    assert output["image_block_order"] == output["images"]
+    assert output["artifact_images"] == ["base", "d455", "left_wrist", "right_wrist"]
+
+    blocks = mcp_result(output_native)["content"]
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    assert len(image_blocks) == 1
+    text_block = next(b for b in blocks if b.get("type") == "text")
+    # Image bytes must be lifted out of the text block, not serialized into it.
+    assert "_image_" not in text_block["text"]
+
+
+@pytest.mark.parametrize("intrinsics_key", ["raw_color_intrinsics", "color_intrinsics"])
+def test_back_project_reads_rpent_state_artifacts(tmp_path: Path, intrinsics_key: str):
+    state = EnvState(tmp_path)
+    with state.record_step(
+        state={
+            "raw": {
+                "left": {"tcp_pose": [0, 0, 0, 0, 0, 0, 1]},
+                "right": {"tcp_pose": [0, 0, 0, 0, 0, 0, 1]},
+            }
+        }
+    ) as step:
+        state.save("base_depth.npy", np.full((4, 4), 0.5), step=step)
+        state.save(
+            "camera_meta.json",
+            {
+                "base_0_rgb": {
+                    intrinsics_key: {
+                        "fx": 100,
+                        "fy": 100,
+                        "ppx": 2,
+                        "ppy": 2,
+                    }
+                }
+            },
+            step=step,
+        )
+
+    config = tmp_path / "robot_config.yaml"
+    fixtures = Path(__file__).parent / "fixtures"
+    config.write_text(
+        "perception:\n"
+        "  calibration:\n"
+        f"    base_camera: {fixtures / 'third_to_right_base_calib_eye_on_base.yaml'}\n"
+        "  projection_views:\n"
+        "    base:\n"
+        "      raw_key: base_0_rgb\n"
+        "      calibration_key: base_camera\n"
+        "      display_name: base RealSense\n"
+        "  base_frames:\n"
+        "    T_right_base_left_base:\n"
+        "      matrix:\n"
+        "        - [1.0, 0.0, 0.0, 0.0]\n"
+        "        - [0.0, 1.0, 0.0, 0.69]\n"
+        "        - [0.0, 0.0, 1.0, 0.0]\n"
+        "        - [0.0, 0.0, 0.0, 1.0]\n"
+    )
+    set_robot_config_path(config)
+    try:
+        result_native = back_project(camera="base", row=2, col=2, state=state)
+        result = result_native.data
+    finally:
+        set_robot_config_path(None)
+
+    assert result["coordinate_frame"] == "right_base"
+    assert result["depth_m"] == 0.5
+    assert len(result["point_xyz"]) == 3
+
+
+def test_load_calibration_bundle_merges_easy_handeye_yamls_and_robot_config(
+    tmp_path: Path,
+):
+    config = tmp_path / "robot_config.yaml"
+    fixtures = Path(__file__).parent / "fixtures"
+    config.write_text(
+        "perception:\n"
+        "  calibration:\n"
+        f"    base_camera: {fixtures / 'third_to_right_base_calib_eye_on_base.yaml'}\n"
+        f"    d455_camera: {fixtures / 'd455_to_right_base_eye_on_base.yaml'}\n"
+        "  localization_validity:\n"
+        "    base_camera:\n"
+        "      depth_m: [0.2, 0.9]\n"
+        "  base_frames:\n"
+        "    T_right_base_left_base:\n"
+        "      matrix:\n"
+        "        - [1.0, 0.0, 0.0, 0.02]\n"
+        "        - [0.0, 1.0, 0.0, 0.7]\n"
+        "        - [0.0, 0.0, 1.0, 0.0]\n"
+        "        - [0.0, 0.0, 0.0, 1.0]\n"
+    )
+    set_robot_config_path(config)
+    try:
+        bundle = load_calibration_bundle()
+    finally:
+        set_robot_config_path(None)
+
+    # easy_handeye YAML entries load verbatim, keyed by camera role.
+    assert bundle["base_camera"]["source_name"] == (
+        "third_to_right_base_calib_eye_on_base.yaml"
+    )
+    assert bundle["base_camera"]["parameters"]["robot_base_frame"] == "right_base"
+    assert bundle["base_camera"]["transformation"]["qw"] == pytest.approx(
+        0.39683199797658536
+    )
+    assert bundle["d455_camera"]["transformation"]["x"] == pytest.approx(
+        1.0742812281624636
+    )
+    # Robot-config sections merge on top of the YAML entries.
+    assert bundle["base_camera"]["localization_validity"] == {"depth_m": [0.2, 0.9]}
+    assert bundle["base_frames"]["T_right_base_left_base"]["matrix"][0][3] == 0.02
+
+
+def test_load_calibration_bundle_rejects_missing_easy_handeye_yaml(tmp_path: Path):
+    config = tmp_path / "robot_config.yaml"
+    config.write_text(
+        "perception:\n  calibration:\n    base_camera: /nonexistent/base_camera.yaml\n"
+    )
+    set_robot_config_path(config)
+    try:
+        with pytest.raises(ValueError, match="base_camera"):
+            load_calibration_bundle()
+    finally:
+        set_robot_config_path(None)
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_back_project_returns_annotated_image_block(
+    tmp_path: Path, monkeypatch, parallel
+):
+    state = EnvState(tmp_path)
+    with state.record_step(
+        state={
+            "raw": {
+                "left": {"tcp_pose": np.array([0, 0, 0, 0, 0, 0, 1])},
+                "right": {"tcp_pose": [0, 0, 0, 0, 0, 0, 1]},
+            }
+        }
+    ) as step:
+        state.save("d455.png", np.zeros((8, 8, 3), dtype=np.uint8), step=step)
+        state.save("d455_depth.npy", np.full((8, 8), 0.5), step=step)
+        state.save(
+            "camera_meta.json",
+            {
+                "d455_rgb": {
+                    "color_intrinsics": {
+                        "fx": 100,
+                        "fy": 100,
+                        "ppx": 4,
+                        "ppy": 4,
+                    }
+                }
+            },
+            step=step,
+        )
+
+    config = tmp_path / "robot_config.yaml"
+    fixtures = Path(__file__).parent / "fixtures"
+    config.write_text(
+        "perception:\n"
+        "  calibration:\n"
+        f"    d455_camera: {fixtures / 'd455_to_right_base_eye_on_base.yaml'}\n"
+        "  projection_views:\n"
+        "    d455:\n"
+        "      raw_key: d455_rgb\n"
+        "      calibration_key: d455_camera\n"
+        "      display_name: D455\n"
+        "  base_frames:\n"
+        "    T_right_base_left_base:\n"
+        "      matrix:\n"
+        "        - [1.0, 0.0, 0.0, 0.01]\n"
+        "        - [0.0, 1.0, 0.0, 0.69]\n"
+        "        - [0.0, 0.0, 1.0, 0.0]\n"
+        "        - [0.0, 0.0, 0.0, 1.0]\n"
+    )
+    targets = ["first", "second"] if parallel else ["first"]
+    save = state.save
+    save_barrier = threading.Barrier(len(targets))
+
+    def synchronized_save(name, value, **kwargs):
+        if name.startswith("d455_back_project_") and name.endswith("_annotated.png"):
+            # Both calls have allocated names before either writes its report.
+            save_barrier.wait(timeout=3)
+        return save(name, value, **kwargs)
+
+    monkeypatch.setattr(state, "save", synchronized_save)
+    set_robot_config_path(config)
+    try:
+        call = partial(back_project, row=4, col=4, state=state)
+        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+            results = list(pool.map(lambda target: call(target_name=target), targets))
+        result_native = results[0]
+        result = result_native.data
+
+        failed_names = []
+        saved_images = []
+
+        def fail_json_save(name, value, **kwargs):
+            if name.startswith("d455_back_project_"):
+                if name.endswith(".json"):
+                    failed_names.append(name)
+                    return None
+                saved_images.append(name)
+            return save(name, value, **kwargs)
+
+        monkeypatch.setattr(state, "save", fail_json_save)
+        failed = call(target_name="failed")
+        assert "failed to save back-project report" in failed.data["diagnostic_error"]
+        failed_image = state.load_bytes(saved_images[0])
+        monkeypatch.setattr(state, "save", save)
+        following = call(target_name="following")
+        following_paths = following.data["diagnostic_artifacts"]
+        assert following_paths["report_json"] not in {
+            str(state.artifact_path(name)) for name in failed_names
+        }
+        assert following_paths["annotated_image"] not in {
+            str(state.artifact_path(name)) for name in saved_images
+        }
+        assert state.load_bytes(saved_images[0]) == failed_image
+    finally:
+        set_robot_config_path(None)
+
+    for key in ("report_json", "annotated_image"):
+        assert len({item.data["diagnostic_artifacts"][key] for item in results}) == len(
+            targets
+        )
+    for target, item in zip(targets, results, strict=True):
+        paths = item.data["diagnostic_artifacts"]
+        report = json.loads(Path(paths["report_json"]).read_text())
+        assert report["projection"]["target_name"] == target
+        assert report["annotated_image"] == paths["annotated_image"]
+        assert item.images == [Path(paths["annotated_image"]).read_bytes()]
+
+    assert result["coordinate_frame"] == "right_base"
+    assert result["tcp_delta_coordinate_frame"] == "right_base"
+    assert result["left_tcp_xyz"] == [0.01, 0.69, 0.0]
+    assert result["right_tcp_xyz"] == [0.0, 0.0, 0.0]
+    point = np.asarray(result["point_xyz"])
+    np.testing.assert_allclose(
+        result["delta_left_tcp_to_point_xyz"],
+        point - np.asarray(result["left_tcp_xyz"]),
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        result["delta_right_tcp_to_point_xyz"],
+        point - np.asarray(result["right_tcp_xyz"]),
+        atol=1e-5,
+    )
+    assert result["diagnostic_artifacts"]["annotated_image"].endswith(".png")
+    assert result_native.images and all(result_native.images)
+    assert result["image_block_order"] == ["d455_selection_diagnostic"]
+
+    blocks = mcp_result(result_native)["content"]
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    assert len(image_blocks) == 1
+    text_block = next(b for b in blocks if b.get("type") == "text")
+    assert "_image_" not in text_block["text"]
+
+
+@pytest.mark.parametrize("parallel", [False, True])
+def test_segment_returns_mask_overlay_and_world_point(tmp_path, monkeypatch, parallel):
+    state = EnvState(tmp_path)
+    with state.record_step(
+        state={
+            "raw": {
+                "left": {"tcp_pose": [0, 0, 0, 0, 0, 0, 1]},
+                "right": {"tcp_pose": [0, 0, 0, 0, 0, 0, 1]},
+            }
+        }
+    ) as step:
+        state.save("d455.png", np.zeros((8, 8, 3), dtype=np.uint8), step=step)
+        state.save("d455_depth.npy", np.full((8, 8), 0.5), step=step)
+        state.save(
+            "camera_meta.json",
+            {
+                "d455_rgb": {
+                    "color_intrinsics": {
+                        "fx": 100,
+                        "fy": 100,
+                        "ppx": 4,
+                        "ppy": 4,
+                    }
+                }
+            },
+            step=step,
+        )
+
+    config = tmp_path / "robot_config.yaml"
+    fixtures = Path(__file__).parent / "fixtures"
+    config.write_text(
+        "perception:\n"
+        "  calibration:\n"
+        f"    d455_camera: {fixtures / 'd455_to_right_base_eye_on_base.yaml'}\n"
+        "  projection_views:\n"
+        "    d455:\n"
+        "      raw_key: d455_rgb\n"
+        "      calibration_key: d455_camera\n"
+        "      display_name: D455\n"
+        "  base_frames:\n"
+        "    T_right_base_left_base:\n"
+        "      matrix:\n"
+        "        - [1.0, 0.0, 0.0, 0.01]\n"
+        "        - [0.0, 1.0, 0.0, 0.69]\n"
+        "        - [0.0, 0.0, 1.0, 0.0]\n"
+        "        - [0.0, 0.0, 0.0, 1.0]\n"
+    )
+    targets = ["first", "second"] if parallel else ["first"]
+    barrier = threading.Barrier(len(targets))
+    localize = perception._mask_to_camera_world
+
+    def synchronized_localize(*args, **kwargs):
+        # Both calls reach localization before either can save an artifact.
+        barrier.wait(timeout=3)
+        return localize(*args, **kwargs)
+
+    monkeypatch.setattr(perception, "_mask_to_camera_world", synchronized_localize)
+    save = state.save
+    save_barrier = threading.Barrier(len(targets))
+
+    def synchronized_save(name, value, **kwargs):
+        if name.startswith("d455_segment_overlay_"):
+            save_barrier.wait(timeout=3)
+        return save(name, value, **kwargs)
+
+    monkeypatch.setattr(state, "save", synchronized_save)
+    set_robot_config_path(config)
+    try:
+        call = partial(
+            segment,
+            prompt="white cardboard box interior",
+            min_valid_depth_pixels=1,
+            state=state,
+            sam3_client=FakeSam3Client(),
+        )
+        with ThreadPoolExecutor(max_workers=len(targets)) as pool:
+            results = list(pool.map(lambda target: call(target_name=target), targets))
+        result_native = results[0]
+        result = result_native.data
+
+        monkeypatch.setattr(perception, "_mask_to_camera_world", localize)
+        failed_names = []
+
+        def fail_json_save(name, value, **kwargs):
+            if name.startswith("d455_segment_") and name.endswith(".json"):
+                failed_names.append(name)
+                return None
+            return save(name, value, **kwargs)
+
+        monkeypatch.setattr(state, "save", fail_json_save)
+        failed = call(target_name="failed")
+        failed_overlay = state.load_bytes(failed.data["overlay_artifact"])
+        monkeypatch.setattr(state, "save", save)
+        following = call(target_name="following")
+        assert failed.is_error
+        assert not following.is_error
+        assert following.data["segment_artifact"] not in failed_names
+        assert following.data["overlay_artifact"] != failed.data["overlay_artifact"]
+        assert state.load_bytes(failed.data["overlay_artifact"]) == failed_overlay
+        assert (
+            state.load(following.data["segment_artifact"])["target_name"] == "following"
+        )
+    finally:
+        set_robot_config_path(None)
+
+    assert len({item.data["segment_artifact"] for item in results}) == len(targets)
+    assert len({item.data["overlay_artifact"] for item in results}) == len(targets)
+    for target, item in zip(targets, results, strict=True):
+        assert not item.is_error
+        assert state.load(item.data["segment_artifact"])["target_name"] == target
+        assert item.images == [state.load_bytes(item.data["overlay_artifact"])]
+    assert result["ok"]
+    assert result["found"]
+    assert result["coordinate_frame"] == "right_base"
+    assert result["tcp_delta_coordinate_frame"] == "right_base"
+    assert "delta_left_tcp_to_point_xyz" in result
+    assert "delta_right_tcp_to_point_xyz" in result
+    assert len(result["point_xyz"]) == 3
+    assert result["centroid_pixel"] == [4, 4]
+    assert result["segment_artifact"].startswith("d455_segment_")
+    assert result["overlay_artifact"].startswith("d455_segment_overlay_")
+    assert result_native.images and all(result_native.images)
+    assert result["image_block_order"] == ["d455_segment_overlay"]
+
+    blocks = mcp_result(result_native)["content"]
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    assert len(image_blocks) == 1
+
+
+def test_segment_without_sam3_client_falls_back(tmp_path: Path):
+    state = EnvState(tmp_path)
+    with state.record_step(state={}):
+        pass
+
+    result_native = segment(prompt="cup", state=state, sam3_client=None)
+    result = result_native.data
+
+    assert not result["ok"]
+    assert "SAM3 client is not configured" in result["error"]
+    assert "back_project" in result["fallback"]
+
+
+def test_vla_grasp_runs_bounded_chunks():
+    env = FakeEnv()
+    primitives = _primitives(env, model=FakeModel())
+
+    result_native = primitives.vla_grasp("hand over the cube", max_chunks=3)
+    result = result_native.data
+
+    assert result["chunks_executed"] == 3
+    assert len(env.chunks) == 3
+
+
+def test_recover_joint_posture_forwards_to_env():
+    env = FakeEnv()
+    primitives = _primitives(env)
+
+    result_native = primitives.recover_joint_posture(reason="joint drift")
+    result = result_native.data
+
+    assert result["ok"]
+    assert result["reason"] == "joint drift"
+
+
+def test_named_clean_desk_vla_uses_fixed_prompt_and_semantic_boundary():
+    env = BoundaryEnv()
+    primitives = _primitives(
+        env,
+        model=FakeModel(expected_prompt=CLEAN_DESK_VLA_PROMPT),
+    )
+
+    result_native = primitives.vla_right_grasp(
+        prompt="grasp the next task-allowed object", max_chunks=2
+    )
+    result = result_native.data
+
+    assert result["ok"]
+    assert result["skill_name"] == "vla_right_grasp"
+    assert result["prompt_overridden"]
+    assert result["boundary"] == "grasp"
+    assert result["boundary_reached"]
+    assert len(env.chunks) == 3
+
+
+def test_named_vla_uses_task_configured_policy_instruction():
+    instruction = "custom checkpoint instruction"
+    primitives = DualFrankaPrimitives(
+        env=BoundaryEnv(),
+        model=FakeModel(expected_prompt=instruction),
+        task_description="planner task description",
+        vla_instruction=instruction,
+        check_cancelled=lambda: None,
+    )
+    result_native = primitives.vla_right_grasp(
+        prompt="planner segment intent", max_chunks=2
+    )
+    result = result_native.data
+    assert result["effective_policy_prompt"] == instruction
+    assert result["prompt_overridden"]

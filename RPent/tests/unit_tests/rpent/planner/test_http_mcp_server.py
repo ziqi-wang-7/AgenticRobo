@@ -1,0 +1,185 @@
+# Copyright 2026 The RPent Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from pathlib import Path
+from typing import Any
+
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+from rpent.dashboard.events import DashboardEventSink
+from rpent.memory.manager import MemoryManager
+from rpent.planner.utils.http_mcp_server import HttpMcpServer
+from rpent.session import EnvState
+from rpent.tools import Toolkit, ToolResult, tool
+from rpent.utils.logging import init_output_dir
+
+CONCURRENT_CALLS = [
+    ("list_dir", {"path": "resources/libero/memory"}),
+    ("read_text_file", {"path": "robots/libero/guides/strict_hybrid_guide.md"}),
+    ("read_text_file", {"path": "robots/libero/guides/pro_hybrid_guide.md"}),
+    ("read_text_file", {"path": "robots/libero/guides/env_calibration.md"}),
+    ("view_env_state", {"step": 0}),
+]
+
+
+class RecordingSink(DashboardEventSink):
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    def emit(self, event: Any) -> None:
+        self.events.append(event)
+
+
+class FakeToolkit(Toolkit):
+    """Minimal toolkit whose tools sleep to widen the overlap window."""
+
+    def __init__(self, state_dir: Path) -> None:
+        super().__init__(
+            dashboard_events=RecordingSink(),
+            state=EnvState(state_dir),
+            memory=MemoryManager(state_dir / "memory"),
+        )
+        self.overlap_errors: list[tuple[str, dict[str, Any]]] = []
+        self._register_fake_tools()
+
+    def _register_fake_tools(self) -> None:
+        @tool(readonly=True)
+        def read_text_file(path: str, max_chars: int = 40000) -> dict:
+            time.sleep(0.05)
+            p = Path(path)
+            return ToolResult(
+                data={"path": str(p), "size": 0, "content": "fake content"}
+            )
+
+        @tool(readonly=True)
+        def list_dir(path: str = "") -> dict:
+            time.sleep(0.05)
+            return ToolResult(data={"path": path, "count": 0, "files": []})
+
+        @tool
+        def view_env_state(step: int = -1) -> dict:
+            time.sleep(0.3)
+            return ToolResult(data={"step": step, "mode": "evaluation"})
+
+        self.add_tool(read_text_file, replace=True)
+        self.add_tool(list_dir, replace=True)
+        self.add_tool(view_env_state)
+
+    def execute_tool(self, name: str, input_dict: dict[str, Any]) -> Any:
+        result = super().execute_tool(name, input_dict)
+        if result.data.get("error") == "another tool operation is still active":
+            self.overlap_errors.append((name, dict(input_dict)))
+        return result
+
+    def get_env_state(
+        self,
+        *,
+        command: dict[str, Any],
+        result: dict[str, Any],
+        elapsed_s: float,
+    ) -> dict[str, Any]:
+        return ToolResult(data={"observed": True})
+
+    def solved(self) -> bool:
+        return False
+
+
+def test_http_mcp_server_schedules_mixed_concurrent_tool_calls(tmp_path: Path) -> None:
+    init_output_dir(tmp_path / "log")
+    toolkit = FakeToolkit(tmp_path)
+    server = HttpMcpServer(toolkit)
+    try:
+        url = server.start()
+        rejected = asyncio.run(_fire_concurrent(url))
+    finally:
+        server.stop()
+
+    assert rejected == 0
+    assert toolkit.overlap_errors == []
+
+
+async def _fire_concurrent(url: str) -> int:
+    rejected = 0
+    # trust_env=False keeps the SDK client on loopback even when the host
+    # advertises an HTTP proxy (e.g. macOS system settings), matching the
+    # production readiness probe in http_mcp_server._wait_for_ready.
+    async with httpx.AsyncClient(trust_env=False) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as (
+            read,
+            write,
+            _get_session_id,
+        ):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                results = await asyncio.gather(
+                    *(session.call_tool(name, args) for name, args in CONCURRENT_CALLS)
+                )
+                for result in results:
+                    if "another tool operation is still active" in json.dumps(
+                        result.content, default=str
+                    ):
+                        rejected += 1
+    return rejected
+
+
+def test_http_mcp_readonly_calls_execute_concurrently(tmp_path):
+    import threading
+
+    init_output_dir(tmp_path / "log")
+    toolkit = FakeToolkit(tmp_path)
+    rendezvous = threading.Barrier(2)
+
+    @tool(readonly=True)
+    def sense(label: str) -> ToolResult:
+        rendezvous.wait(timeout=5)
+        return ToolResult(data={"label": label})
+
+    toolkit.add_tool(sense)
+    server = HttpMcpServer(toolkit)
+
+    async def scenario(url):
+        async with httpx.AsyncClient(trust_env=False) as http_client:
+            async with streamable_http_client(url, http_client=http_client) as (
+                read,
+                write,
+                _,
+            ):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    results = await asyncio.gather(
+                        session.call_tool("sense", {"label": "left"}),
+                        session.call_tool("sense", {"label": "right"}),
+                    )
+                    assert not any(result.isError for result in results)
+                    assert [
+                        json.loads(result.content[0].text)["label"]
+                        for result in results
+                    ] == ["left", "right"]
+
+    try:
+        asyncio.run(scenario(server.start()))
+    finally:
+        toolkit.close()
+        server.stop()

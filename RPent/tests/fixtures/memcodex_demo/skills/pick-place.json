@@ -1,0 +1,17 @@
+{
+  "id": "pick-place",
+  "text": "Use the available pick and place skills. Confirm the grasp, keep it closed during transport, and release after support is observed.",
+  "task_ids": [
+    "demo/mug-to-plate"
+  ],
+  "applies_when": {
+    "graspable": true
+  },
+  "provides": [
+    "skill"
+  ],
+  "skill_ids": [
+    "pick",
+    "place"
+  ]
+}

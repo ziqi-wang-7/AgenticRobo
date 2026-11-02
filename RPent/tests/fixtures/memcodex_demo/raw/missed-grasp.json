@@ -1,0 +1,14 @@
+{
+  "id": "missed-grasp",
+  "text": "If the grasp missed, re-localize the same target and verify the fingers are clear before retrying. Do not carry an unconfirmed grasp.",
+  "task_ids": [
+    "demo/mug-to-plate"
+  ],
+  "applies_when": {
+    "failure": "missed_grasp"
+  },
+  "provides": [
+    "anomaly",
+    "recovery"
+  ]
+}
