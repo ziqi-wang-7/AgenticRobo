@@ -297,7 +297,7 @@ corpus and a separate deterministic metadata index. Build and validate it once:
 .venv/bin/python -m repro.index_memcodex_memory memory/memcodex_v1 \
   --source memory/libero/GPT_6_astra_low \
   --receipt memory/libero/GPT_6_astra_low.download-receipt.json \
-  --output memory/memcodex_m2_v1/INDEX.json
+  --output memory/memcodex_m2_v2/INDEX.json
 ```
 
 Online retrieval opens at most eight candidates per visited layer, selected from
@@ -311,8 +311,10 @@ The LIBERO `retrieve_memory` tool checks the live `task_language`, latest step,
 available primitives and failed-grasp status. `purpose="overview"` returns only
 the summary; its sufficiency verdict covers this limited purpose. Execution
 queries also require object localization and applicable skill guidance; recovery
-queries require recovery guidance. Missing perception stops after relational
-guidance instead of escalating to historical coordinates. `back_project` and
+queries require recovery guidance. Missing perception does not stop skill or raw
+reads. The response separates `memory_missing` / `memory_read_complete` from
+`state_missing` / `state_evidence_complete`. The latter only covers requested
+evidence checks, not physical success or execution permission. `back_project` and
 `segment` attach evidence IDs to successful current-step results. The planner
 binds task object IDs to those IDs after inspecting images; motion invalidates
 old evidence. This verifies evidence provenance, not the semantic identity of
@@ -335,13 +337,14 @@ and reset commands remain non-executable historical evidence.
 .venv/bin/python -m repro.memcodex_m2 \
   --baseline logs/liberopro-baseline-astra-low-s1-20261030-tmux \
   --output logs/m2-development-object-t0-s2 \
+  --index memory/memcodex_m2_v2/INDEX.json \
   --suite libero_object_task --task 0 --seed 2
 .venv/bin/python -m repro.liberopro_baseline run logs/m2-development-object-t0-s2
 ```
 
 For 80 paired seed-1 episodes omit suite/task/seed and choose a fresh output.
 The production CLI accepts `--memcodex-root memory/memcodex_v1 --memcodex-mode m2
---memcodex-index memory/memcodex_m2_v1/INDEX.json --memory-token-budget 32768`.
+--memcodex-index memory/memcodex_m2_v2/INDEX.json --memory-token-budget 32768`.
 Use Codex evaluation and a validated index; do not combine with exploration,
 `--memory-dir`, or `--memory-repo`. M0 and default fixed M1 remain separate modes.
 
@@ -423,7 +426,7 @@ The response header and private retrieval trace separate:
 - `action_preconditions_met`: every fixed action fact is independently verified.
 - `action_missing_facts` and `action_unverified_facts`: absent evidence versus
   existing planner claims requiring visual judgment.
-- `routing_decision`: `STOP`, `DESCEND`, `OBSERVE`, or `REVIEW`, with a reason.
+- `routing_decision`: `STOP`, `NARROW`, `DESCEND`, `OBSERVE`, or `REVIEW`, with a reason.
 
 Because this adapter has no independent identity/holding/placement verifier,
 normal candidate queries retain unverified facts and report
@@ -455,7 +458,7 @@ controller = MemCodexController(
     "memory/memcodex_v1",
     token_budget=32768,
     mode="m2",
-    index_path="memory/memcodex_m2_v1/INDEX.json",
+    index_path="memory/memcodex_m2_v2/INDEX.json",
     route=manual_route,  # Replace with a reviewed pure function of the same signature.
     route_name="manual-v1",
 )
@@ -464,7 +467,45 @@ controller = MemCodexController(
 Pass a robot-adapter-validated `action_query` to `retrieve_with_trace`. The fixed
 runtime computes coverage from retained entries and validated facts, outside
 the routing function. An unsupported `STOP` cannot mark missing or claimed facts
-as verified. The same budget and whole-entry packing rules apply. `NARROW` is
-not implemented in this baseline. Use identical action workflows and budgets
+as verified. Nor can `OBSERVE` bypass missing memory before raw is exhausted.
+`NARROW` selects the runtime-proposed `narrow_ids` for the next layer; a custom
+policy cannot inject entry IDs or change applicability. The same budget and
+whole-entry packing rules apply. Use identical action workflows and budgets
 when comparing manual and replacement policies; measure complete episode token
 usage, latency and native success separately from retrieval coverage.
+
+### Source-linked descent and narrowing
+
+New indexes use schema 2 and store `source_links` plus bounded `issue_tags`.
+Links connect entries citing the same source file to entries in deeper layers;
+line references remain available for audit. These are provenance links, not a
+semantic relation graph or proof of applicability. The reader verifies the
+links against entry provenance. Frozen schema-1 indexes remain readable and
+validatable: links are derived from metadata without rewriting the corpus, but
+failure-topic tags require a schema-2 rebuild. Use a new output path as above;
+the builder refuses to overwrite a different existing index.
+
+Before descending, `NARROW` can restrict the next layer to source-linked entries
+and then current primitive/recovery topics. Topic hints come from the reported
+issue and offline-indexed text; they require no model call and establish no
+current facts. If retained evidence is insufficient, the reader widens to other
+eligible task candidates in the same layer, then descends as needed. Rejected
+entries, unmet structured conditions and task boundaries remain enforced.
+A full skill awaiting applicability review may return `REVIEW`; it is not
+counted as usable merely because its source is reachable.
+
+The private `routing_steps` trace records `NARROW`, `WIDEN`, descent and final
+decisions, including selected candidate IDs and missing memory/state evidence.
+The eight-file cap applies to both passes together; `LIMIT` records unread
+candidates when it binds. Budget-omitted bodies never count as coverage. Raw is
+a fallback, not an unconditional read, and missing current localization never
+becomes valid from historical coordinates. Once guidance is complete, state
+gaps request observation rather than more history. This does not implement an
+evolution loop, execute a skill, or update the frozen experience package.
+
+Offline acceptance checks (no GPT, VLA or simulator):
+
+```bash
+.venv/bin/python -m pytest tests/unit_tests/rpent/memory \
+  tests/unit_tests/robots/libero/test_action_evidence_contracts.py -q
+```

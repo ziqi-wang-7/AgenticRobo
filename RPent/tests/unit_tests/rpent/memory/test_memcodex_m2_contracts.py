@@ -113,7 +113,10 @@ def test_early_stop_and_only_selected_bodies_open(indexed, monkeypatch):
     assert overview.sufficient and overview.layers_visited == ("summary",)
     assert len(opened) == overview.files_read == 1
     missing_perception = query(control, localized=False)
-    assert missing_perception.layers_visited == ("summary", "relational")
+    assert missing_perception.layers_visited == ("summary", "relational", "skills")
+    assert missing_perception.memory_read_complete
+    assert not missing_perception.state_evidence_complete
+    assert not missing_perception.memory_missing
     assert not missing_perception.sufficient
     assert "object_localization" in missing_perception.missing
     ready = query(control)

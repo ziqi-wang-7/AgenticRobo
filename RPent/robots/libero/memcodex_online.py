@@ -191,10 +191,10 @@ class M2LiberoToolkit(LiberoToolkit):
 
         Args:
             step: Latest state step; stale observations are rejected.
-            purpose: overview for summary; execute after localization; recover after a problem.
+            purpose: overview for summary; execute for skill guidance; recover after a problem.
             localizations: Required object IDs mapped to current back_project/segment memory_evidence_id values. You must verify each semantic identity in the images.
             applicable_entries: Previously returned entry IDs verified for this step and candidate.
-            issue: Current anomaly observed in images; a planner report, not an environment success label.
+            issue: Current anomaly observed in images; guides topic narrowing, never establishes an environment fact.
             candidate: Optional proposed primitive and task-object roles. Retrieves evidence without executing it.
             visual_checks: Planner-attributed holding or placement checks tied to a recorded current image.
             rejected_entries: Previously returned entry IDs found inapplicable for this step and candidate.
@@ -263,6 +263,8 @@ class M2LiberoToolkit(LiberoToolkit):
                 "available_skills": sorted(self._tools),
                 "needs_recovery": failed or purpose == "recover",
                 "anomaly": bool(issue),
+                "issue": issue,
+                "last_action": action,
                 "applicable_entries": sorted(confirmed),
             }
             if rejected:

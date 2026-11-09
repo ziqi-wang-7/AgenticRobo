@@ -62,6 +62,10 @@ class RetrievalResult:
     routing_policy: str | None = None
     routing_decision: str | None = None
     routing_reason: str | None = None
+    memory_missing: tuple[str, ...] = ()
+    state_missing: tuple[str, ...] = ()
+    state_evidence_complete: bool | None = None
+    routing_steps: tuple[dict, ...] = ()
 
 
 class MemCodexController:

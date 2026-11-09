@@ -23,6 +23,7 @@ from pathlib import Path
 
 from repro.memcodex_corpus import HISTORICAL, cell_key, digest, encoded, validate
 from rpent.memory.memcodex.hierarchy import LAYERS
+from rpent.memory.memcodex.lineage import issue_tags, source_links
 
 
 def task_requirements(language: str) -> dict:
@@ -162,6 +163,7 @@ def build_index(root: Path) -> dict:
                 data.get("condition_text") and data["condition_text"] != HISTORICAL
             ),
             "source_refs": data["source_refs"],
+            "issue_tags": issue_tags(data["text"]),
         }
         entries[name] = entry
         for task in bindings & tasks.keys():
@@ -192,9 +194,10 @@ def build_index(root: Path) -> dict:
                             }
                         )
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "mode": "m2",
-        "version": "m2-index-v1",
+        "version": "m2-index-v2",
+        "source_links": source_links(entries),
         "corpus_manifest_sha256": digest((root / "MANIFEST.json").read_bytes()),
         "source_revision": manifest["source_revision"],
         "tasks": tasks,
@@ -204,7 +207,15 @@ def build_index(root: Path) -> dict:
 
 def validate_index(root: Path, index_path: Path) -> dict:
     """Rebuild metadata, task bindings and source hashes to detect stale indexes."""
-    if json.loads(index_path.read_text()) != build_index(root):
+    actual = json.loads(index_path.read_text())
+    expected = build_index(root)
+    if actual.get("schema_version") == 1:
+        # Preserve frozen v1 runs; the reader derives their source links in memory.
+        expected.update(schema_version=1, version="m2-index-v1")
+        expected.pop("source_links")
+        for entry in expected["entries"].values():
+            entry.pop("issue_tags")
+    if actual != expected:
         raise ValueError("Index differs from deterministic metadata rebuild")
     return {
         "status": "passed",

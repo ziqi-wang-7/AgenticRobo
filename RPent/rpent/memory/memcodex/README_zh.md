@@ -212,7 +212,7 @@ M0 部分原生命令输出混合了记忆与其他内容，无法完整归因 M
 .venv/bin/python -m repro.index_memcodex_memory memory/memcodex_v1 \
   --source memory/libero/GPT_6_astra_low \
   --receipt memory/libero/GPT_6_astra_low.download-receipt.json \
-  --output memory/memcodex_m2_v1/INDEX.json
+  --output memory/memcodex_m2_v2/INDEX.json
 ```
 
 在线先查任务索引，再打开候选正文，每层最多读取 8 条，顺序为摘要→关系→技能→原始
@@ -222,7 +222,10 @@ M0 部分原生命令输出混合了记忆与其他内容，无法完整归因 M
 
 LIBERO 的 `retrieve_memory` 工具读取本回合真实的任务指令、最新步骤、可用原语和抓取
 失败信息。`purpose="overview"` 只请求摘要，其充分性也仅针对摘要；执行请求还检查
-物体定位和技能指导，恢复请求还检查恢复指导。缺少观测时在关系层停止，要求补观测。
+物体定位和技能指导，恢复请求还检查恢复指导。缺少观测不阻断 skills 或 raw 读取。
+返回值分别报告 `memory_missing`／`memory_read_complete` 和
+`state_missing`／`state_evidence_complete`；后者仅表示本次请求的证据检查，
+不证明物理状态或授予执行权限。
 成功的当前步骤 `back_project`／`segment` 输出附带定位凭据，规划器观察图像后将任务
 物体 ID 绑定到凭据；运动后旧凭据失效。这验证了定位数据的来源，不能证明选中的像素
 或掩码就是正确物体。控制器不读取仿真器的物体真值坐标。
@@ -240,13 +243,14 @@ LIBERO 的 `retrieve_memory` 工具读取本回合真实的任务指令、最新
 .venv/bin/python -m repro.memcodex_m2 \
   --baseline logs/liberopro-baseline-astra-low-s1-20261030-tmux \
   --output logs/m2-development-object-t0-s2 \
+  --index memory/memcodex_m2_v2/INDEX.json \
   --suite libero_object_task --task 0 --seed 2
 .venv/bin/python -m repro.liberopro_baseline run logs/m2-development-object-t0-s2
 ```
 
 准备 80 回合 seed 1 配对评测时，省略 suite/task/seed 并选新目录。生产 CLI 对应参数是
 `--memcodex-root memory/memcodex_v1 --memcodex-mode m2 --memcodex-index
-memory/memcodex_m2_v1/INDEX.json --memory-token-budget 32768`。使用 Codex 评测和已
+memory/memcodex_m2_v2/INDEX.json --memory-token-budget 32768`。使用 Codex 评测和已
 校验的索引，不与探索、`--memory-dir`、`--memory-repo` 混用。M0 和默认的固定 M1
 仍是独立模式。
 
@@ -315,7 +319,7 @@ M1 和非索引模式不接受此开关。
 - `memory_read_complete`：保留的条目覆盖当前候选技能和必要的恢复指导。
 - `action_preconditions_met`：固定动作契约要求的事实全部通过独立验证。
 - `action_missing_facts` 和 `action_unverified_facts`：缺少证据，以及已有但仍需判断的声明。
-- `routing_decision`：`STOP`、`DESCEND`、`OBSERVE` 或 `REVIEW`，附带原因。
+- `routing_decision`：`STOP`、`NARROW`、`DESCEND`、`OBSERVE` 或 `REVIEW`，附带原因。
 
 当前适配器没有独立的身份、持物或放置验证器，因此正常的候选查询仍存在未验证事实，
 即使提供视觉检查也会返回 `action_preconditions_met=false`。`sufficient` 要求两个
@@ -341,7 +345,7 @@ controller = MemCodexController(
     "memory/memcodex_v1",
     token_budget=32768,
     mode="m2",
-    index_path="memory/memcodex_m2_v1/INDEX.json",
+    index_path="memory/memcodex_m2_v2/INDEX.json",
     route=manual_route,  # 可换为相同签名、经过审阅的纯函数。
     route_name="manual-v1",
 )
@@ -349,6 +353,35 @@ controller = MemCodexController(
 
 向 `retrieve_with_trace` 传入机器人适配器校验后的 `action_query`。固定运行时在路由
 函数之外，依据真正保留的条目与有效证据计算覆盖情况；无依据的 `STOP` 不能将缺失或
-声明状态改成已验证。原有预算和完整条目打包约束继续生效。此基线尚未实现 `NARROW`。
+声明状态改成已验证；在 raw 耗尽前，`OBSERVE` 也不能跳过缺失的记忆。
+`NARROW` 使用运行时提出的 `narrow_ids` 限定下一层范围；替换策略不能注入条目 ID
+或更改适用性。原有预算和完整条目打包约束继续生效。
 比较人工规则和替换策略时，应固定动作流程与预算，另外测量整回合 Token、耗时和环境
 原生成功率，不将检索覆盖视为任务成功。
+
+### 沿来源展开与缩小检索范围
+
+新索引使用 schema 2，保存 `source_links` 和有限的失败主题 `issue_tags`。
+来源链接将引用同一源文件的条目连接到更深层条目，原文行号继续保留用于审计。
+这些是来源关联，不是语义关系图，也不证明经验适用。读取器会按条目来源核对链接。
+冻结的 schema-1 索引仍可读取和校验：来源关联由元数据推导，不改写语料；失败主题
+需要重新构建 schema-2 索引。请使用上方命令的新输出路径，转换器拒绝覆盖不同索引。
+
+下降前，`NARROW` 可以先选择有来源关联的条目，再根据当前原语与恢复问题缩小范围。
+主题来自报告的问题和离线索引正文，不调用模型，也不建立当前环境事实。保留的正文
+仍不足时，会扩大到同层其他符合条件的任务候选，然后按需下降。拒绝条目、未满足的
+结构化适用条件和任务边界仍然有效。已交付的完整技能若需要核对适用性，可以返回
+`REVIEW`，不能仅因能追溯到来源就计作有效指导。
+
+私有 `routing_steps` 日志记录 `NARROW`、`WIDEN`、下降与最终决策，附带候选 ID 和
+记忆／状态缺口。两轮读取共用每层八文件上限，触及上限时用 `LIMIT` 记录未读候选。
+预算省略的正文不能计入覆盖度。raw 是兜底，不是每次必读；历史坐标不能补齐当前定位。
+指导足够后，状态缺口应补观测，不继续读历史。本实现不包含程序演化、技能自动执行
+或冻结经验包的在线更新。
+
+离线验收（不调用 GPT、不加载 VLA、不启动仿真器）：
+
+```bash
+.venv/bin/python -m pytest tests/unit_tests/rpent/memory \
+  tests/unit_tests/robots/libero/test_action_evidence_contracts.py -q
+```

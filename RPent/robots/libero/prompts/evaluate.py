@@ -607,14 +607,19 @@ Before planning manipulation, perform the perception pass. Successful
 back_project/segment results supply memory_evidence_id. Bind each required object
 ID to its own current-step evidence ID in retrieve_memory(..., purpose="execute",
 localizations={...}). Verify semantic identity from images: a depth point alone
-does not identify an object. After motion old evidence IDs expire; re-localize
-before another retrieval. You may keep using already-delivered guidance without
-calling retrieve_memory after every action.
+does not identify an object. After motion old evidence IDs expire. Omit missing
+localizations when requesting recovery guidance; obtain fresh evidence before
+using coordinates for an action. You may keep using already-delivered guidance
+without calling retrieve_memory after every action.
 
 Retrieval progresses summary -> relational -> skills -> raw only as needed.
-If missing contains object_localization, acquire observations rather than reread
-memory. If review_entries is nonempty, inspect those entries' applicability
-conditions against the current scene. Confirm only applicable IDs with
+Memory gaps cause further reading even when localization is absent. Check
+memory_read_complete and memory_missing separately from state_missing:
+object_localization requires fresh observations before using action geometry,
+not repeated retrieval of already-delivered guidance. NARROW focuses linked
+sources and action/failure topics; insufficient guidance widens the search
+within the task and may descend to raw. If review_entries is nonempty, inspect
+those entries' applicability conditions against the current scene. Confirm only applicable IDs with
 applicable_entries in your next call at the same step. Analogies are explicitly
 marked different tasks; obey the CURRENT task_language, never replace its goal
 with a reference goal. On a failed grasp or observed anomaly, use purpose="recover"
@@ -648,7 +653,10 @@ with held_object and placement_ready with the release destination. Cite only a
 camera PNG actually saved at the current step. These are attributed claims,
 not independently verified physical facts. Do not invent confirmations.
 
-memory_read_complete covers retained guidance. OBSERVE requests missing current
+memory_read_complete covers retained guidance, independently of current facts.
+NARROW focuses source-linked action/failure guidance; incomplete focused reads
+widen within the task before descending further. Missing geometry does not
+prevent reading recovery instructions. OBSERVE requests missing current
 evidence; REVIEW asks you to judge claims or memory conditions from images.
 Read action_missing_facts and action_unverified_facts separately. Claimed
 identity/holding/placement keep action_preconditions_met false by design.

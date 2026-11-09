@@ -33,12 +33,13 @@ _ROUTING_ENVELOPES = (
     ("STOP", "evidence_covered"),
     ("DESCEND", "continue_memory_read"),
     ("DESCEND", "layers_exhausted"),
+    ("NARROW", "focus_next_layer"),
     ("OBSERVE", "missing_action_facts"),
     ("REVIEW", "unverified_action_facts"),
     ("REVIEW", "memory_entry_review"),
     *(
         (action, "fixed_evidence_contract")
-        for action in ("STOP", "DESCEND", "OBSERVE", "REVIEW")
+        for action in ("STOP", "NARROW", "DESCEND", "OBSERVE", "REVIEW")
     ),
 )
 
@@ -102,6 +103,15 @@ def retrieve_indexed(
         action_unverified_facts = tuple(
             k for k in action_query.required_facts if k in present and k not in verified
         )
+    state_missing = ()
+    if (
+        action_query is None
+        and (purpose != "overview" or recovery)
+        and not set(required_objects) <= localized
+    ):
+        state_missing = ("object_localization",)
+    if action_query is not None:
+        state_missing = (*action_missing_facts, *action_unverified_facts)
     facts = state.get("conditions", {})
     kept: list[tuple[dict, str]] = []
     visited, omitted, seen_paths = [], [], set()
@@ -138,8 +148,6 @@ def retrieve_indexed(
             if profile["layers"]["summary"]:
                 missing.append("task_summary")
         if action_query is not None or purpose != "overview" or recovery:
-            if action_query is None and not set(required_objects) <= localized:
-                missing.append("object_localization")
             skills = {
                 s
                 for m in usable
@@ -157,7 +165,7 @@ def retrieve_indexed(
     def combined_missing(memory_missing: tuple[str, ...]) -> tuple[str, ...]:
         if action_missing_facts or action_unverified_facts:
             return (*memory_missing, "action_preconditions")
-        return memory_missing
+        return (*memory_missing, *state_missing)
 
     def render_data(items: list[tuple[dict, str]]) -> tuple[dict, str]:
         memory_missing = assess(items)
@@ -171,6 +179,10 @@ def retrieve_indexed(
             if action_query is None
             else sorted(required),
             "sufficient": not missing,
+            "memory_read_complete": not memory_missing,
+            "memory_missing": memory_missing,
+            "state_missing": state_missing,
+            "state_evidence_complete": not state_missing,
             "missing": missing,
             "review_entries": review_entries(items),
             "exact_summary_available": bool(profile["layers"]["summary"]),
@@ -180,7 +192,6 @@ def retrieve_indexed(
                 candidate_tool=action_query.tool,
                 candidate_step=action_query.step,
                 candidate_fingerprint=action_query.fingerprint,
-                memory_read_complete=not memory_missing,
                 action_preconditions_met=not (
                     action_missing_facts or action_unverified_facts
                 ),
@@ -224,13 +235,11 @@ def retrieve_indexed(
 
     if not fits([]):
         raise ValueError("Memory budget cannot fit the query/status envelope")
-    routing = None
-    for layer in LAYERS:
-        visited.append(layer)
-        candidates = corpus.candidates(task, layer, tuple(required), recovery)
-        eligible = [
+
+    def eligible_candidates(layer: str) -> list[dict]:
+        return [
             m
-            for m in candidates
+            for m in corpus.candidates(task, layer, tuple(sorted(required)), recovery)
             if m["key"] not in rejected
             and (
                 action_query is None
@@ -242,52 +251,131 @@ def retrieve_indexed(
                 for k, v in m["applies_when"].items()
             )
         ]
-        for metadata in eligible[: controller.retriever.max_per_layer]:
-            if metadata["path"] in seen_paths:
-                continue
-            seen_paths.add(metadata["path"])
-            entry = corpus.read(metadata)
-            reads += 1
-            text = entry.render()
-            if metadata["match"] == "analogy":
-                text = (
-                    "ANALOGY ONLY — different task: "
-                    + metadata["reference_task"]
-                    + "\n"
-                    + text
+
+    routing = None
+    routing_steps = []
+    pending_scope: set[str] | None = None
+    focus_skills = (
+        (action_query.tool,)
+        if action_query is not None
+        else (state["last_action"],)
+        if state.get("last_action") in available
+        else tuple(sorted(required))
+    )
+    for layer_index, layer in enumerate(LAYERS):
+        visited.append(layer)
+        eligible = eligible_candidates(layer)
+        first = (
+            [m for m in eligible if m["key"] in pending_scope]
+            if pending_scope is not None
+            else eligible
+        )
+        fallback = [m for m in eligible if m not in first]
+        layer_reads = 0
+        for pass_index, candidates in enumerate((first, fallback)):
+            if pass_index:
+                if not assess(kept) or not candidates:
+                    break
+                routing_steps.append(
+                    {
+                        "action": "WIDEN",
+                        "layer": layer,
+                        "reason": "focused_memory_incomplete",
+                        "candidate_ids": [m["key"] for m in candidates],
+                    }
                 )
-            candidate_tokens += controller.compressor.count(text)
-            proposal = [*kept, (metadata, text)]
-            if fits(proposal):
-                kept = proposal
-            else:
-                omitted.append(entry.key)
-            if not assess(kept):
-                break
+            for metadata in candidates:
+                if layer_reads >= controller.retriever.max_per_layer:
+                    break
+                if metadata["path"] in seen_paths:
+                    continue
+                seen_paths.add(metadata["path"])
+                entry = corpus.read(metadata)
+                reads += 1
+                layer_reads += 1
+                text = entry.render()
+                if metadata["match"] == "analogy":
+                    text = (
+                        "ANALOGY ONLY — different task: "
+                        + metadata["reference_task"]
+                        + "\n"
+                        + text
+                    )
+                candidate_tokens += controller.compressor.count(text)
+                proposal = [*kept, (metadata, text)]
+                if fits(proposal):
+                    kept = proposal
+                else:
+                    omitted.append(entry.key)
+                if not assess(kept):
+                    break
         missing = assess(kept)
-        if action_query is not None:
-            context = RoutingContext(
-                layer=layer,
-                query=action_query,
-                memory_missing=missing,
-                action_missing_facts=action_missing_facts,
-                action_unverified_facts=action_unverified_facts,
-                review_entries=review_entries(kept),
-                selected_ids=tuple(m["key"] for m, _ in kept),
+        if missing and layer_reads >= controller.retriever.max_per_layer:
+            unread = [m["key"] for m in eligible if m["path"] not in seen_paths]
+            if unread:
+                routing_steps.append(
+                    {
+                        "action": "LIMIT",
+                        "layer": layer,
+                        "reason": "per_layer_read_cap",
+                        "candidate_ids": unread,
+                    }
+                )
+        narrow_ids: tuple[str, ...] = ()
+        narrow_reason = ""
+        next_layer = None
+        if missing and layer_index + 1 < len(LAYERS):
+            next_layer = LAYERS[layer_index + 1]
+            next_candidates = eligible_candidates(next_layer)
+            focused, narrow_reason = corpus.narrow(
+                next_candidates,
+                parents=tuple(m["path"] for m, _ in kept),
+                skills=focus_skills,
                 recovery=recovery,
+                issue=str(state.get("issue", "")),
             )
+            if 0 < len(focused) < len(next_candidates):
+                narrow_ids = tuple(m["key"] for m in focused)
+        context = RoutingContext(
+            layer=layer,
+            query=action_query,
+            memory_missing=missing,
+            action_missing_facts=action_missing_facts
+            if action_query
+            else state_missing,
+            action_unverified_facts=action_unverified_facts,
+            review_entries=tuple(
+                m["key"]
+                for m, _ in kept
+                if m["key"] in review_entries(kept) and relevant_guidance(m)
+            ),
+            selected_ids=tuple(m["key"] for m, _ in kept),
+            recovery=recovery,
+            narrow_ids=narrow_ids,
+        )
+        if action_query is not None:
             routing = _candidate_route(controller, context)
-            if routing[0] != "DESCEND":
-                break
-            continue
-        if not missing:
+            decision, reason = routing
+        else:
+            decision = manual_route(context).action
+            reason = "memory_coverage_and_current_evidence"
+        routing_steps.append(
+            {
+                "action": decision,
+                "layer": layer,
+                "reason": narrow_reason if decision == "NARROW" else reason,
+                "memory_missing": list(missing),
+                "state_missing": list(state_missing),
+                **(
+                    {"next_layer": next_layer, "candidate_ids": list(narrow_ids)}
+                    if decision == "NARROW"
+                    else {}
+                ),
+            }
+        )
+        if decision not in {"DESCEND", "NARROW"}:
             break
-        if layer == "summary" and purpose == "overview" and not recovery:
-            break
-        if layer == "relational" and "object_localization" in missing:
-            break  # Reading historical raw coordinates cannot repair absent perception.
-        if layer == "skills" and review_entries(kept):
-            break  # Have the existing planner review candidates before escalating.
+        pending_scope = set(narrow_ids) if decision == "NARROW" else None
     corpus.check_revision()
     context = render(*render_data(kept), routing=routing)
     if routing is not None and not fits_text(context):
@@ -311,7 +399,11 @@ def retrieve_indexed(
         cache_hit=False,
         elapsed_ms=(perf_counter() - started) * 1000,
         files_opened=tuple(sorted(seen_paths)),
-        memory_read_complete=not memory_missing if action_query is not None else None,
+        memory_read_complete=not memory_missing,
+        memory_missing=memory_missing,
+        state_missing=state_missing,
+        state_evidence_complete=not state_missing,
+        routing_steps=tuple(routing_steps),
         action_preconditions_met=not (action_missing_facts or action_unverified_facts)
         if action_query is not None
         else None,
@@ -338,10 +430,27 @@ def _candidate_route(
             action == "STOP"
             and not (context.memory_read_complete and context.action_preconditions_met)
         )
-        or (action == "OBSERVE" and not context.action_missing_facts)
+        or (
+            action == "OBSERVE"
+            and (
+                not context.action_missing_facts
+                or (not context.memory_read_complete and context.layer != "raw")
+            )
+        )
+        or (
+            action == "NARROW"
+            and (not context.narrow_ids or context.memory_read_complete)
+        )
         or (
             action == "REVIEW"
-            and not (context.review_entries or context.action_unverified_facts)
+            and (
+                not (context.review_entries or context.action_unverified_facts)
+                or (
+                    not context.memory_read_complete
+                    and context.layer != "raw"
+                    and not context.review_entries
+                )
+            )
         )
         or (
             action == "DESCEND"
@@ -350,6 +459,8 @@ def _candidate_route(
         )
     ):
         return manual_route(context).action, "fixed_evidence_contract"
+    if action == "NARROW":
+        return action, "focus_next_layer"
     if action == "OBSERVE":
         return action, "missing_action_facts"
     if action == "REVIEW":

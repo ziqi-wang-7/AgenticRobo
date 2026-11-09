@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 
 from rpent.memory.memcodex.hierarchy import LAYERS, MemoryEntry
+from rpent.memory.memcodex.lineage import issue_tags, source_links
 
 
 class IndexedCorpus:
@@ -32,8 +33,11 @@ class IndexedCorpus:
         payload = self.index_path.read_bytes()
         self.revision = hashlib.sha256(payload).hexdigest()
         self.index = json.loads(payload)
-        if self.index.get("schema_version") != 1 or self.index.get("mode") != "m2":
-            raise ValueError("Expected a schema-1 M2 task index")
+        if (
+            self.index.get("schema_version") not in {1, 2}
+            or self.index.get("mode") != "m2"
+        ):
+            raise ValueError("Expected a schema-1 or schema-2 M2 task index")
         self.manifest_path = self.root / "MANIFEST.json"
         self.manifest_hash = self.index["corpus_manifest_sha256"]
         if (
@@ -65,6 +69,16 @@ class IndexedCorpus:
                         or item["match"] not in {"exact", "shared", "analogy"}
                     ):
                         raise ValueError(f"Invalid task posting: {task}/{layer}")
+        self.source_links = source_links(self.index["entries"])
+        if self.index["schema_version"] == 2:
+            if self.index.get("source_links") != self.source_links:
+                raise ValueError("Index source links disagree with entry provenance")
+            for entry in self.index["entries"].values():
+                tags = entry.get("issue_tags")
+                if not isinstance(tags, list) or any(
+                    not isinstance(t, str) for t in tags
+                ):
+                    raise ValueError("Invalid issue tags in M2 index")
         self._fingerprints = self._stat()
 
     def _stat(self) -> tuple:
@@ -102,6 +116,52 @@ class IndexedCorpus:
                 x["path"],
             ),
         )
+
+    def narrow(
+        self,
+        candidates: list[dict],
+        *,
+        parents: tuple[str, ...],
+        skills: tuple[str, ...],
+        recovery: bool,
+        issue: str,
+    ) -> tuple[list[dict], str]:
+        """Prefer linked evidence and current action/failure topics before widening.
+
+        This is a bounded read proposal. Excluded candidates stay available as
+        fallback if the retained evidence is insufficient; tags confer no trust.
+        """
+        if not candidates:
+            return candidates, "no_candidates"
+        layer = candidates[0]["layer"]
+        linked = {
+            path
+            for parent in parents
+            for path in self.source_links.get(parent, {}).get(layer, ())
+        }
+        focused = [m for m in candidates if m["path"] in linked]
+        reason = ["source_links"] if focused else []
+        focused = focused or candidates
+        if layer in {"skills", "raw"}:
+            relevant = [
+                m
+                for m in focused
+                if set(skills).intersection(m["skill_ids"])
+                or (recovery and "recovery" in m["provides"])
+            ]
+            if relevant:
+                focused = relevant
+                reason.append("action_or_recovery")
+            topics = set(issue_tags(issue))
+            scores = {
+                m["path"]: len(topics.intersection(m.get("issue_tags", ())))
+                for m in focused
+            }
+            best = max(scores.values(), default=0)
+            if recovery and best:
+                focused = [m for m in focused if scores[m["path"]] == best]
+                reason.append("failure_topic")
+        return focused, "+".join(reason) or "task_candidates"
 
     def read(self, item: dict) -> MemoryEntry:
         """Read one bounded entry and validate its content hash and metadata."""

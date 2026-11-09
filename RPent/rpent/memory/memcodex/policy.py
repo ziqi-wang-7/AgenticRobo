@@ -47,13 +47,14 @@ class RoutingContext:
     """Facts and coverage of the retained context after a retrieval layer."""
 
     layer: str
-    query: ActionQuery
+    query: ActionQuery | None
     memory_missing: tuple[str, ...]
     action_missing_facts: tuple[str, ...]
     action_unverified_facts: tuple[str, ...]
     review_entries: tuple[str, ...]
     selected_ids: tuple[str, ...]
     recovery: bool
+    narrow_ids: tuple[str, ...] = ()
 
     @property
     def memory_read_complete(self) -> bool:
@@ -70,10 +71,10 @@ class RoutingContext:
 class RoutingDecision:
     """Propose a read action without changing evidence or granting execution."""
 
-    action: Literal["STOP", "DESCEND", "OBSERVE", "REVIEW"]
+    action: Literal["STOP", "NARROW", "DESCEND", "OBSERVE", "REVIEW"]
 
     def __post_init__(self) -> None:
-        if self.action not in {"STOP", "DESCEND", "OBSERVE", "REVIEW"}:
+        if self.action not in {"STOP", "NARROW", "DESCEND", "OBSERVE", "REVIEW"}:
             raise ValueError(f"Unknown memory routing action: {self.action!r}")
 
 
@@ -88,4 +89,6 @@ def manual_route(context: RoutingContext) -> RoutingDecision:
             return RoutingDecision("STOP")
     if context.layer in {"skills", "raw"} and context.review_entries:
         return RoutingDecision("REVIEW")
+    if context.narrow_ids:
+        return RoutingDecision("NARROW")
     return RoutingDecision("DESCEND")
