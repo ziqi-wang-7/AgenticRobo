@@ -358,3 +358,113 @@ Task success, LLM calls and all original telemetry remain separately measured.
 M2 changes retrieval, tool delivery, state checks and available fallback evidence.
 Evaluate success and total episode memory tokens together against paired M1;
 reduced context per call does not guarantee fewer calls or lower total tokens.
+
+## Action-conditioned evidence baseline
+
+For indexed M2, add `--memcodex-action-evidence` to the production CLI command
+above. This selects a planner workflow that obtains geometry for the proposed
+action's target or destination; later geometry can be deferred. Omit the flag
+to retain the original M2 prompt. The optional `candidate` tool parameter is
+available in either M2 workflow. M1 and non-indexed modes do not accept the flag.
+
+For a reproducible batch, add `--action-evidence` to `python -m
+repro.memcodex_m2`. The plan records `action_evidence`, hashes the robot evidence
+adapter and core policy sources, and forwards the production flag to each run.
+The CLI uses `manual_route`; an offline evolution driver and custom-policy file
+loader are not included.
+
+Use the object IDs returned by overview and current evidence IDs returned by
+`back_project` or `segment`. For example, after observing the milk at step 0:
+
+```json
+{
+  "step": 0,
+  "purpose": "execute",
+  "candidate": {
+    "tool": "pi0_pick",
+    "args": {"prompt": "pick up the milk"},
+    "roles": {"target_object": "milk"},
+    "expected_effect": "holding the milk"
+  },
+  "localizations": {"milk": "loc-0001"}
+}
+```
+
+This is an example `retrieve_memory` argument object; replace the step and
+evidence ID with actual outputs. The query does not require basket localization
+or guidance for a later release. It validates the proposed tool's registered
+argument schema, applies its defaults, and never executes the candidate.
+
+| Candidate tool | Required roles | Additional contract |
+| --- | --- | --- |
+| `pi0_pick` | `target_object` | Current target geometry; identity remains a planner interpretation. |
+| `move_to` | `held_object`, `destination` | Distinct task objects, current destination geometry, `gripper=1.0`, and a holding check. Only transport is supported. |
+| `release` | `held_object`, `destination` | Distinct task objects, current destination geometry, holding and placement-readiness checks. |
+
+Unsupported primitives use ordinary retrieval without `candidate` when needed.
+An empty-gripper approach to an identified pick target reuses that target's
+geometry and pick guidance, with the guides' motion checks; it does not force
+localization of future destinations. `expected_effect` is an optional description; it
+cannot override the tool's parameters or establish an observed fact.
+
+Optional `visual_checks` records positive planner interpretations, for example
+`{"fact":"holding","object_id":"milk","step":3,"artifact":"wrist_high.png"}`.
+For release, `placement_ready` names the destination. Each check must name the
+appropriate candidate object and a camera PNG recorded at the current step.
+These checks remain `claimed`; pointing to an image does not independently
+verify its contents. Geometric localization is `verified` only as a tool-derived
+coordinate with planner-provided semantic binding. Identity is a separate claim.
+The existing pick heuristic never establishes holding.
+
+The response header and private retrieval trace separate:
+
+- `memory_read_complete`: retained entries cover the candidate skill and any
+  required recovery guidance.
+- `action_preconditions_met`: every fixed action fact is independently verified.
+- `action_missing_facts` and `action_unverified_facts`: absent evidence versus
+  existing planner claims requiring visual judgment.
+- `routing_decision`: `STOP`, `DESCEND`, `OBSERVE`, or `REVIEW`, with a reason.
+
+Because this adapter has no independent identity/holding/placement verifier,
+normal candidate queries retain unverified facts and report
+`action_preconditions_met=false`, even after visual checks. `sufficient` requires
+both completeness fields to be true. Do not repeat retrieval to turn a claim
+into verification: inspect observations and use the existing planner-controlled
+primitive workflow. These fields grant no execution permission. `OBSERVE`
+reports a gap; it does not capture a frame or return extra images. Automatic
+primitive image returns, VLA inputs and planner scheduling are unchanged.
+
+Use `applicable_entries` and `rejected_entries` for previously returned memory
+entries. The lists must be disjoint and are scoped to the current step and
+normalized candidate fingerprint. Changing a tool parameter or role invalidates
+the prior review scope. Explicitly rejected candidates are skipped so retrieval
+can proceed to raw experience. A query without a candidate has a separate scope.
+
+### Replacing the pure routing function
+
+[`policy.py`](policy.py) defines frozen `ActionQuery`, `RoutingContext` and
+`RoutingDecision` objects. A function receives only immutable candidate and
+coverage data and returns a read decision. It must perform no I/O, model calls,
+state mutation or primitive execution. The controller does not sandbox custom
+Python code; load only reviewed functions. Supply one through the Python API:
+
+```python
+from rpent.memory.memcodex import MemCodexController, manual_route
+
+controller = MemCodexController(
+    "memory/memcodex_v1",
+    token_budget=32768,
+    mode="m2",
+    index_path="memory/memcodex_m2_v1/INDEX.json",
+    route=manual_route,  # Replace with a reviewed pure function of the same signature.
+    route_name="manual-v1",
+)
+```
+
+Pass a robot-adapter-validated `action_query` to `retrieve_with_trace`. The fixed
+runtime computes coverage from retained entries and validated facts, outside
+the routing function. An unsupported `STOP` cannot mark missing or claimed facts
+as verified. The same budget and whole-entry packing rules apply. `NARROW` is
+not implemented in this baseline. Use identical action workflows and budgets
+when comparing manual and replacement policies; measure complete episode token
+usage, latency and native success separately from retrieval coverage.

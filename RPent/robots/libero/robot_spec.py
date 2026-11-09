@@ -209,6 +209,11 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
         "--memcodex-index", type=Path, help="Validated task index; required for M2."
     )
     parser.add_argument(
+        "--memcodex-action-evidence",
+        action="store_true",
+        help="Use the action-specific evidence workflow and manual routing baseline in M2.",
+    )
+    parser.add_argument(
         "--memory-token-budget",
         type=int,
         default=32768,

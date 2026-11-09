@@ -26,6 +26,11 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
+from robots.libero.action_evidence import (
+    ActionCandidate,
+    ActionVisualCheck,
+    build_action_query,
+)
 from robots.libero.memcodex import SOURCE_REVISION
 from robots.libero.toolkit import LiberoToolkit
 from rpent.memory.memcodex import MemCodexController
@@ -87,6 +92,7 @@ def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
         "cache_enabled": False,
         "memory_update": False,
         "delivery": "retrieve_memory_tool",
+        "action_evidence": bool(getattr(args, "memcodex_action_evidence", False)),
         "localization": "current_step_perception_evidence_with_planner_semantic_binding",
     }
     controller = make_controller(record)
@@ -98,7 +104,11 @@ def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
         "Use retrieve_memory for indexed task experience.\n"
     )
     (output / "m2-config.json").write_text(json.dumps(record, indent=2) + "\n")
-    config.prompt_vars.update(memory_mode="m2", memory_dir=str(view))
+    config.prompt_vars.update(
+        memory_mode="m2",
+        memory_dir=str(view),
+        memcodex_action_evidence=record["action_evidence"],
+    )
 
 
 class IndexedMemoryManager(FixedMemoryManager):
@@ -128,7 +138,7 @@ class M2LiberoToolkit(LiberoToolkit):
         super()._register_libero_tools()
         self._memory_lock = RLock()
         self._localization_evidence: dict[str, dict] = {}
-        self._memory_seen: dict[int, set[str]] = {}
+        self._memory_seen: dict[tuple[int, str], set[str]] = {}
         for name in ("back_project", "segment"):
             original = self._tools[name]
             self.add_tool(
@@ -156,7 +166,10 @@ class M2LiberoToolkit(LiberoToolkit):
                     "tool": original.name,
                     "xyz": list(xyz),
                     "camera": data.get("camera"),
-                    "source_artifact": data.get("source_artifact"),
+                    "source_artifact": data.get("source_artifact")
+                    or data.get("image_artifact"),
+                    "image_artifact": data.get("image_artifact"),
+                    "segment_artifact": data.get("segment_artifact"),
                     "arguments": kwargs,
                 }
                 data["memory_evidence_id"] = evidence_id
@@ -170,6 +183,9 @@ class M2LiberoToolkit(LiberoToolkit):
         localizations: dict[str, str] | None = None,
         applicable_entries: list[str] | None = None,
         issue: str = "",
+        candidate: ActionCandidate | None = None,
+        visual_checks: list[ActionVisualCheck] | None = None,
+        rejected_entries: list[str] | None = None,
     ) -> ToolResult:
         """Read task experience from summary through raw evidence only as needed.
 
@@ -177,8 +193,11 @@ class M2LiberoToolkit(LiberoToolkit):
             step: Latest state step; stale observations are rejected.
             purpose: overview for summary; execute after localization; recover after a problem.
             localizations: Required object IDs mapped to current back_project/segment memory_evidence_id values. You must verify each semantic identity in the images.
-            applicable_entries: Previously returned entry IDs whose applicability conditions you verified in this scene, at this step.
+            applicable_entries: Previously returned entry IDs verified for this step and candidate.
             issue: Current anomaly observed in images; a planner report, not an environment success label.
+            candidate: Optional proposed primitive and task-object roles. Retrieves evidence without executing it.
+            visual_checks: Planner-attributed holding or placement checks tied to a recorded current image.
+            rejected_entries: Previously returned entry IDs found inapplicable for this step and candidate.
         """
         with self._memory_lock:
             record = self._state.latest_record()
@@ -203,10 +222,31 @@ class M2LiberoToolkit(LiberoToolkit):
                         f"Missing or stale perception evidence for {name}: {key}"
                     )
                 evidence[name] = {"id": key, **item}
+            normalized_candidate, action_query = None, None
+            if candidate is not None:
+                normalized_candidate, action_query = build_action_query(
+                    ActionCandidate.model_validate(candidate, strict=True),
+                    tools=self._tools,
+                    step=step,
+                    task_objects=profile["required_objects"],
+                    localizations=evidence,
+                    artifacts=record.artifacts,
+                    visual_checks=[
+                        ActionVisualCheck.model_validate(check, strict=True)
+                        for check in visual_checks or ()
+                    ],
+                )
+            elif visual_checks:
+                raise ValueError("Visual checks require an action candidate")
+
+            review_scope = (step, action_query.fingerprint if action_query else "")
             confirmed = set(applicable_entries or [])
-            if not confirmed <= self._memory_seen.get(step, set()):
+            rejected = set(rejected_entries or [])
+            if confirmed & rejected:
+                raise ValueError("An entry cannot be both applicable and rejected")
+            if not (confirmed | rejected) <= self._memory_seen.get(review_scope, set()):
                 raise ValueError(
-                    "Only entries already returned at this step may be confirmed"
+                    "Only entries already returned for this step and candidate may be reviewed"
                 )
             result = record.result or {}
             action = (record.command or {}).get("action")
@@ -225,13 +265,17 @@ class M2LiberoToolkit(LiberoToolkit):
                 "anomaly": bool(issue),
                 "applicable_entries": sorted(confirmed),
             }
+            if rejected:
+                state["rejected_entries"] = sorted(rejected)
             retrieved = memory.controller.retrieve_with_trace(
-                memory.record["task"], observation, state
+                memory.record["task"], observation, state, action_query=action_query
             )
             response = ToolResult(data={"memory_context": retrieved.context})
             if "[truncated]" in response.to_text():
                 raise RuntimeError("M2 memory response unexpectedly truncated")
-            self._memory_seen.setdefault(step, set()).update(retrieved.selected_ids)
+            self._memory_seen.setdefault(review_scope, set()).update(
+                retrieved.selected_ids
+            )
             trace = {
                 **asdict(retrieved),
                 "step": step,
@@ -249,6 +293,9 @@ class M2LiberoToolkit(LiberoToolkit):
                     response.to_text().encode()
                 ).hexdigest(),
             }
+            if action_query is not None:
+                trace["candidate"] = normalized_candidate
+                trace["action_query"] = asdict(action_query)
             with (memory.output_dir / "m2-retrievals.jsonl").open("a") as stream:
                 stream.write(
                     json.dumps(trace, ensure_ascii=False, allow_nan=False) + "\n"

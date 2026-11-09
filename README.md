@@ -2,6 +2,7 @@
 
 基于 RPent / HarnessVLA 的机器人记忆检索实验。当前代码包含 M1 固定分层记忆和
 M2 按任务索引逐层检索，以及 LIBERO / LIBERO-PRO 的在线接入、测量和配对评测脚本。
+M2 可通过 `--memcodex-action-evidence` 启用候选动作取证流程和人工规则基线。
 
 ## 代码入口
 
@@ -10,6 +11,8 @@ M2 按任务索引逐层检索，以及 LIBERO / LIBERO-PRO 的在线接入、�
 - [Memory Controller](RPent/rpent/memory/memcodex/controller.py)：预算和检索模式。
 - [M2 逐层检索](RPent/rpent/memory/memcodex/coarse.py)：摘要 → 关系 → 技能 → 原始经验。
 - [LIBERO 在线接入](RPent/robots/libero/memcodex_online.py)：当前步骤的定位凭据、条件核对和恢复状态。
+- [动作证据契约](RPent/robots/libero/action_evidence.py)：候选参数、对象角色和当前证据来源校验。
+- [纯路由接口与人工规则](RPent/rpent/memory/memcodex/policy.py)：可由 Python 接口替换的读取策略。
 - [语料转换](RPent/repro/convert_astra_memory.py)、[校验](RPent/repro/validate_memcodex_corpus.py)
   和[索引构建](RPent/repro/index_memcodex_memory.py)。
 - [M2 配对清单准备](RPent/repro/memcodex_m2.py)和[指标采集](RPent/profiling)。
@@ -17,6 +20,8 @@ M2 按任务索引逐层检索，以及 LIBERO / LIBERO-PRO 的在线接入、�
 M2 默认每次检索最多提供 32,768 个估算 Token，并受 60,000 字节传输上限约束。
 它使用规则检查信息覆盖，不增加判断用的 LLM 调用，也不启用 M3 结果缓存。
 是否保持成功率、降低整回合 Token 和耗时，需要完成配对评测后判断。
+动作模式区分记忆指导完整性与动作事实验证；规划器的视觉声明不会被升级为独立验证。
+当前实现不自动执行候选、不裁剪图像，也不包含离线演化驱动。
 
 ## 本地检查
 

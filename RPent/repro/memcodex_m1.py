@@ -71,6 +71,7 @@ def prepare(args: argparse.Namespace) -> None:
         names.update(
             {
                 "robots/libero/memcodex_online.py",
+                "robots/libero/action_evidence.py",
                 "repro/index_memcodex_memory.py",
                 "repro/memcodex_m2.py",
             }
@@ -111,12 +112,17 @@ def prepare(args: argparse.Namespace) -> None:
             memcodex_index=str(args.index.resolve()),
             index_sha256=index_validation["index_sha256"],
             early_stop=True,
+            action_evidence=bool(getattr(args, "action_evidence", False)),
             comparison_limitations=[
                 "M2 uses indexed progressive tool delivery and step-bound perception evidence; M1 injects a fixed context once.",
                 "Sufficiency is a deterministic coverage rule, not a task-success guarantee. No result cache or extra judging LLM.",
                 "Historical raw sources and marked analogies are available only on escalation. Memory tokens count each serialized delivery without a history multiplier.",
             ],
         )
+        if plan["action_evidence"]:
+            plan["comparison_limitations"].append(
+                "Action evidence changes the planner's perception workflow and candidate-scoped retrieval together; compare routing policies with this workflow fixed."
+            )
     output.mkdir(parents=True)
     write(output / "plan.json", plan)
     plan["example_command"] = command(output, episodes[0], plan["deployment"])

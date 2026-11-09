@@ -628,6 +628,66 @@ If relevant guidance is unavailable or the budget omits it, say so and proceed
 using current observations and the robot guides. Record used entry IDs in the audit.
 """
 
+ACTION_MEMORY = """Use retrieve_memory(step=<latest>, purpose="overview") to learn
+the exact task and its required_objects IDs. When you already have a candidate
+pi0_pick, closed-gripper transport move_to, or release, include candidate in an
+existing execute/recover retrieval: {tool, args, roles, expected_effect?}.
+For pi0_pick, roles is {target_object: <task object ID>}. For transport move_to
+and release, roles is {held_object: <ID>, destination: <distinct ID>}; transport
+move_to must explicitly use gripper=1.0. Other primitives use ordinary retrieval
+without candidate only if guidance is needed. Reuse the pick guidance for its
+empty-gripper approach; do not add a separate full-task retrieval just for that
+approach. expected_effect is descriptive and cannot establish a fact.
+
+Bind the candidate's target or destination to its current back_project/segment
+memory_evidence_id via localizations. Only geometry provenance is verified;
+semantic identity remains your image interpretation. For transport or release,
+visual_checks can record positive image interpretations as
+{fact: "holding" | "placement_ready", object_id, step, artifact}. Use holding
+with held_object and placement_ready with the release destination. Cite only a
+camera PNG actually saved at the current step. These are attributed claims,
+not independently verified physical facts. Do not invent confirmations.
+
+memory_read_complete covers retained guidance. OBSERVE requests missing current
+evidence; REVIEW asks you to judge claims or memory conditions from images.
+Read action_missing_facts and action_unverified_facts separately. Claimed
+identity/holding/placement keep action_preconditions_met false by design.
+Repeated retrieval cannot certify a visual claim: inspect evidence and retain
+responsibility for the next primitive under the ordinary robot rules. STOP
+ends memory reading only. No retrieval result authorizes execution or predicts
+task success, and historical coordinates must never become current targets.
+
+Confirm applicable review_entries with applicable_entries, or reject them with
+rejected_entries so retrieval can continue. Both lists must refer to entries
+returned for this same step and candidate (including its parameters); changing
+the candidate requires a fresh retrieval. On an observed problem use recover
+and describe issue. Keep already-delivered guidance; do not add a retrieval
+before every primitive. Record selected entry IDs in the final audit."""
+
+ACTION_PERCEPTION = """Identify the task's targets, destinations and relation
+landmarks in the initial agentview image. For a supported candidate, obtain
+current geometry for its target_object (pick) or destination (transport/release)
+before using that geometry. Resolve any relation landmarks needed to identify
+that object; ambiguity requires further observation. Geometry for later actions
+may be deferred until those candidates are selected.
+For these candidates this action-specific geometry pass replaces the guides'
+all-object pre-task geometry pass. Their identity, motion and visual-verification
+rules still apply.
+
+Use calibrated agentview_high.png for identity and matching back_project pixels
+or segment for geometry. Wrist observations refine the SAME identified object;
+reject inconsistent refinements and confirm basket interiors, not rims. Keep a
+table of observed entities, artifact/step, semantic evidence, pixels, current
+coordinates and uncertainty. After every primitive, inspect the returned state
+and images; old localization IDs expire. Never infer holding from pi0_pick's
+heuristic success flag alone. Release still requires your visual judgment of
+holding and placement readiness. An empty-gripper approach to the already
+identified pick target uses the same target geometry and the guides' motion
+checks; it does not require future destination geometry or an action candidate.
+Other unsupported task patterns retain the full perception pass and ordinary
+robot guides. Current-step evidence requests do not acquire a new camera frame
+automatically."""
+
 
 def system_prompt(
     variables: Mapping[str, object] | None = None,
@@ -635,11 +695,15 @@ def system_prompt(
     """Assemble the LIBERO evaluation prompt for the selected memory profile."""
     enabled = bool((variables or {}).get("enable_direct_action", False))
     memory_mode = (variables or {}).get("memory_mode")
+    action_evidence = memory_mode == "m2" and bool(
+        (variables or {}).get("memcodex_action_evidence", False)
+    )
+    m2_memory = ACTION_MEMORY if action_evidence else M2_MEMORY
     if memory_mode in {"m1", "m2"}:
         memory_instruction = (
             "Use the supplied task memory and its conditions before planning. No library search is required."
             if memory_mode == "m1"
-            else M2_MEMORY
+            else m2_memory
         )
         return {
             "ROLE AND EVALUATION": ROLE_AND_EVALUATION,
@@ -648,8 +712,10 @@ def system_prompt(
             "YOUR GOAL": GOAL,
             "RULES (NON-NEGOTIABLE)": RULES,
             "LOCALIZATION": LOCALIZATION,
-            "FIRST-STEP ALGORITHM": PERCEPTION_ALGORITHM,
-            "TASK MEMORY": "{{m1_context}}" if memory_mode == "m1" else M2_MEMORY,
+            "FIRST-STEP ALGORITHM": (
+                ACTION_PERCEPTION if action_evidence else PERCEPTION_ALGORITHM
+            ),
+            "TASK MEMORY": "{{m1_context}}" if memory_mode == "m1" else m2_memory,
             "WORKFLOW": Numbered(
                 workflow_steps(
                     (
@@ -658,7 +724,7 @@ def system_prompt(
                         memory_instruction
                         if memory_mode == "m1"
                         else "Follow TASK MEMORY: retrieve overview, localize, then retrieve execution guidance; recover only as needed.",
-                        STEP_PERCEPTION_PASS,
+                        ACTION_PERCEPTION if action_evidence else STEP_PERCEPTION_PASS,
                         STEP_EXECUTE,
                         STEP_PRIMITIVES,
                         STEP_RECOVERY,

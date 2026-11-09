@@ -25,6 +25,12 @@ from typing import Any
 from rpent.memory.memcodex.cache import RetrievalCache
 from rpent.memory.memcodex.compressor import ContextCompressor
 from rpent.memory.memcodex.hierarchy import LAYERS, MemoryEntry, MemoryHierarchy
+from rpent.memory.memcodex.policy import (
+    ActionQuery,
+    RoutingContext,
+    RoutingDecision,
+    manual_route,
+)
 from rpent.memory.memcodex.retriever import LayerRetriever
 from rpent.memory.memcodex.router import RetrievalQuery, RetrievalRouter, Sufficiency
 
@@ -49,6 +55,13 @@ class RetrievalResult:
     cache_hit: bool
     elapsed_ms: float
     files_opened: tuple[str, ...] = ()
+    memory_read_complete: bool | None = None
+    action_preconditions_met: bool | None = None
+    action_missing_facts: tuple[str, ...] = ()
+    action_unverified_facts: tuple[str, ...] = ()
+    routing_policy: str | None = None
+    routing_decision: str | None = None
+    routing_reason: str | None = None
 
 
 class MemCodexController:
@@ -71,6 +84,8 @@ class MemCodexController:
             all summary, relational and skill entries in stable order, without
             routing, early stopping or caching. Budget overflow raises an error.
         index_path: Required immutable metadata index for M2; no full-layer scans.
+        route: Pure read decision for candidate-specific M2 requests.
+        route_name: Stable trace label for a supplied routing policy.
     """
 
     def __init__(
@@ -84,6 +99,8 @@ class MemCodexController:
         max_per_layer: int = 8,
         mode: str = "progressive",
         index_path: str | Path | None = None,
+        route: Callable[[RoutingContext], RoutingDecision] = manual_route,
+        route_name: str | None = None,
     ) -> None:
         if mode not in {"progressive", "fixed", "m2"}:
             raise ValueError("mode must be progressive, fixed or m2")
@@ -95,6 +112,10 @@ class MemCodexController:
         self.hierarchy = MemoryHierarchy(self.memory_root)
         self.router = RetrievalRouter()
         self.retriever = LayerRetriever(self.router, max_per_layer=max_per_layer)
+        self.route = route
+        self.route_name = route_name or getattr(
+            route, "__qualname__", type(route).__name__
+        )
         self.indexed = None
         if mode == "m2":
             from rpent.memory.memcodex.indexed import IndexedCorpus
@@ -123,15 +144,21 @@ class MemCodexController:
         task: str,
         observation: Mapping[str, Any] | None = None,
         state: Mapping[str, Any] | None = None,
+        *,
+        action_query: ActionQuery | None = None,
     ) -> str:
         """Return memory context; inspect last_result for missing evidence."""
-        return self.retrieve_with_trace(task, observation, state).context
+        return self.retrieve_with_trace(
+            task, observation, state, action_query=action_query
+        ).context
 
     def retrieve_with_trace(
         self,
         task: str,
         observation: Mapping[str, Any] | None = None,
         state: Mapping[str, Any] | None = None,
+        *,
+        action_query: ActionQuery | None = None,
     ) -> RetrievalResult:
         """Escalate only when the context that fits is insufficient.
 
@@ -142,7 +169,11 @@ class MemCodexController:
         if self.mode == "m2":
             from rpent.memory.memcodex.coarse import retrieve_indexed
 
-            return retrieve_indexed(self, task, observation, state)
+            return retrieve_indexed(
+                self, task, observation, state, action_query=action_query
+            )
+        if action_query is not None:
+            raise ValueError("An action query requires indexed M2 retrieval")
         if self.mode == "fixed":
             return self._retrieve_fixed(task, started)
         query = self.router.query(task, observation, state)

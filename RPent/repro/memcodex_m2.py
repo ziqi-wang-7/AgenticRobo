@@ -30,6 +30,7 @@ def main() -> None:
         "--index", type=Path, default=Path("memory/memcodex_m2_v1/INDEX.json")
     )
     parser.add_argument("--token-budget", type=int, default=32768)
+    parser.add_argument("--action-evidence", action="store_true")
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--suite")
     parser.add_argument("--task", type=int)

@@ -259,3 +259,96 @@ memory/memcodex_m2_v1/INDEX.json --memory-token-budget 32768`。使用 Codex 评
 
 M2 同时改变检索、工具提供方式、状态检查和可用的补充经验。需与 M1 配对测量成功率
 及整回合记忆 Token；单次上下文变短不保证调用更少，也不保证总 Token 更低。
+
+## 动作条件化证据基线
+
+在上面的 M2 生产 CLI 命令中增加 `--memcodex-action-evidence`，即可启用动作级取证
+流程。规划器针对候选动作的目标或目的地获取几何信息，后续动作的定位可以推迟。
+省略此参数时保留原 M2 提示词。两种 M2 流程都支持可选的 `candidate` 工具参数；
+M1 和非索引模式不接受此开关。
+
+准备实验批次时，在 `python -m repro.memcodex_m2` 中增加 `--action-evidence`。
+实验清单会记录 `action_evidence`，对机器人证据适配器和核心策略代码计算哈希，
+并将生产开关传入每个回合。CLI 使用人工规则 `manual_route`；当前不包含离线演化
+驱动或自定义策略文件加载器。
+
+使用 overview 返回的对象 ID，以及当前 `back_project` 或 `segment` 返回的证据 ID。
+例如，步骤 0 已定位牛奶后，可以这样调用 `retrieve_memory`：
+
+```json
+{
+  "step": 0,
+  "purpose": "execute",
+  "candidate": {
+    "tool": "pi0_pick",
+    "args": {"prompt": "pick up the milk"},
+    "roles": {"target_object": "milk"},
+    "expected_effect": "holding the milk"
+  },
+  "localizations": {"milk": "loc-0001"}
+}
+```
+
+将示例步骤和证据 ID 替换为真实输出。此查询不要求同时定位篮子或取得后续释放动作
+的指导。运行时复用已注册工具的参数 schema 进行严格校验、补齐默认值，不执行候选。
+
+| 候选工具 | 必需角色 | 额外约束 |
+| --- | --- | --- |
+| `pi0_pick` | `target_object` | 当前目标几何信息；对象身份仍属于规划器的视觉判断。 |
+| `move_to` | `held_object`、`destination` | 两个不同的任务对象、当前目的地几何信息、`gripper=1.0` 和持物检查；仅支持搬运。 |
+| `release` | `held_object`、`destination` | 两个不同的任务对象、当前目的地几何信息、持物和放置就绪检查。 |
+
+未支持的原语在需要指导时使用不带 `candidate` 的普通检索。空夹爪接近已确定的抓取
+目标时，可以复用该目标的几何信息和抓取指导，并遵守指南中的运动检查，无需为这个
+接近动作提前定位后续目的地。
+`expected_effect` 是可选文字描述，不能覆盖真实工具参数，也不能作为已观测事实。
+
+可选的 `visual_checks` 记录规划器的肯定性视觉判断，例如
+`{"fact":"holding","object_id":"milk","step":3,"artifact":"wrist_high.png"}`。
+释放前的 `placement_ready` 指向目的地对象。检查必须匹配候选角色，并引用当前步骤
+已保存的相机 PNG。此类检查始终标为 `claimed`；引用图片不等于独立验证了图中内容。
+定位记录的 `verified` 仅表示几何坐标来自感知工具，对象的语义绑定仍由规划器提供，
+身份另列为声明。原有抓取启发式结果不能证明持物。
+
+返回头和私有检索日志分别记录：
+
+- `memory_read_complete`：保留的条目覆盖当前候选技能和必要的恢复指导。
+- `action_preconditions_met`：固定动作契约要求的事实全部通过独立验证。
+- `action_missing_facts` 和 `action_unverified_facts`：缺少证据，以及已有但仍需判断的声明。
+- `routing_decision`：`STOP`、`DESCEND`、`OBSERVE` 或 `REVIEW`，附带原因。
+
+当前适配器没有独立的身份、持物或放置验证器，因此正常的候选查询仍存在未验证事实，
+即使提供视觉检查也会返回 `action_preconditions_met=false`。`sufficient` 要求两个
+完整性字段同时为真。不要反复检索来把声明变成验证；检查观测，并按现有规则由规划器
+决定下一原语。这些字段不授予执行权限。`OBSERVE` 只报告缺口，不自动拍摄或附加图像。
+原语的自动图像回包、VLA 输入和规划器调度保持原有行为。
+
+用 `applicable_entries` 确认已返回经验，用 `rejected_entries` 拒绝不适用经验。
+两者不能重叠，作用域绑定当前步骤和规范化候选的指纹。改变参数或角色会使旧的审阅
+作用域失效。拒绝的候选会被跳过，允许继续下探原始经验。不带候选的查询使用独立作用域。
+
+### 替换纯路由函数
+
+[`policy.py`](policy.py) 定义不可变的 `ActionQuery`、`RoutingContext` 和
+`RoutingDecision`。函数接收候选及证据覆盖信息，返回读取决策；不得执行 I/O、调用
+模型、修改状态或执行原语。控制器不提供 Python 代码沙箱，只应加载已审阅函数。
+通过 Python 接口注入：
+
+```python
+from rpent.memory.memcodex import MemCodexController, manual_route
+
+controller = MemCodexController(
+    "memory/memcodex_v1",
+    token_budget=32768,
+    mode="m2",
+    index_path="memory/memcodex_m2_v1/INDEX.json",
+    route=manual_route,  # 可换为相同签名、经过审阅的纯函数。
+    route_name="manual-v1",
+)
+```
+
+向 `retrieve_with_trace` 传入机器人适配器校验后的 `action_query`。固定运行时在路由
+函数之外，依据真正保留的条目与有效证据计算覆盖情况；无依据的 `STOP` 不能将缺失或
+声明状态改成已验证。原有预算和完整条目打包约束继续生效。此基线尚未实现 `NARROW`。
+比较人工规则和替换策略时，应固定动作流程与预算，另外测量整回合 Token、耗时和环境
+原生成功率，不将检索覆盖视为任务成功。

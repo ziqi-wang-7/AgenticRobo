@@ -131,6 +131,8 @@ def command(batch: Path, cell: dict, deployment: dict) -> list[str]:
                         plan["memcodex_index"],
                     ]
                 )
+                if plan.get("action_evidence", False):
+                    argv.append("--memcodex-action-evidence")
     return argv
 
 
@@ -245,6 +247,7 @@ def report(batch: Path) -> dict:
         benchmark="LIBERO-PRO",
         condition=plan.get("condition", "original_harnessvla_full"),
         memcodex_enabled=plan.get("memcodex_enabled", False),
+        action_evidence=plan.get("action_evidence", False),
     )
     suites = {
         suite: summarize(

@@ -15,5 +15,20 @@
 """Opt-in progressive memory retrieval; independent of the original manager."""
 
 from rpent.memory.memcodex.controller import MemCodexController, RetrievalResult
+from rpent.memory.memcodex.policy import (
+    ActionFact,
+    ActionQuery,
+    RoutingContext,
+    RoutingDecision,
+    manual_route,
+)
 
-__all__ = ["MemCodexController", "RetrievalResult"]
+__all__ = [
+    "ActionFact",
+    "ActionQuery",
+    "MemCodexController",
+    "RetrievalResult",
+    "RoutingContext",
+    "RoutingDecision",
+    "manual_route",
+]

@@ -41,6 +41,8 @@ DEFAULT_REPO = "RLinf/RPent-memory"
 def validate_options(args: argparse.Namespace) -> None:
     """Check memory options without starting services or downloading files."""
     indexed = getattr(args, "memcodex_mode", "fixed") == "m2"
+    if getattr(args, "memcodex_action_evidence", False) and not indexed:
+        raise ValueError("--memcodex-action-evidence requires --memcodex-mode m2")
     if indexed and (
         not getattr(args, "memcodex_root", None)
         or not getattr(args, "memcodex_index", None)
