@@ -34,10 +34,10 @@ class IndexedCorpus:
         self.revision = hashlib.sha256(payload).hexdigest()
         self.index = json.loads(payload)
         if (
-            self.index.get("schema_version") not in {1, 2}
+            self.index.get("schema_version") not in {1, 2, 3}
             or self.index.get("mode") != "m2"
         ):
-            raise ValueError("Expected a schema-1 or schema-2 M2 task index")
+            raise ValueError("Expected a schema-1, schema-2 or schema-3 M2 task index")
         self.manifest_path = self.root / "MANIFEST.json"
         self.manifest_hash = self.index["corpus_manifest_sha256"]
         if (
@@ -70,7 +70,7 @@ class IndexedCorpus:
                     ):
                         raise ValueError(f"Invalid task posting: {task}/{layer}")
         self.source_links = source_links(self.index["entries"])
-        if self.index["schema_version"] == 2:
+        if self.index["schema_version"] >= 2:
             if self.index.get("source_links") != self.source_links:
                 raise ValueError("Index source links disagree with entry provenance")
             for entry in self.index["entries"].values():

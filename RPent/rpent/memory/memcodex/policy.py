@@ -87,7 +87,14 @@ def manual_route(context: RoutingContext) -> RoutingDecision:
             return RoutingDecision("REVIEW")
         if context.memory_read_complete:
             return RoutingDecision("STOP")
-    if context.layer in {"skills", "raw"} and context.review_entries:
+    unresolved_case = any(
+        m.startswith("recovery_case:") for m in context.memory_missing
+    )
+    if (
+        context.layer in {"skills", "raw"}
+        and context.review_entries
+        and not (context.layer == "skills" and unresolved_case)
+    ):
         return RoutingDecision("REVIEW")
     if context.narrow_ids:
         return RoutingDecision("NARROW")

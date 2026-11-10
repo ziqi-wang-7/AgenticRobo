@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 
 from rpent.memory.memcodex.hierarchy import LAYERS
 from rpent.memory.memcodex.policy import RoutingContext, RoutingDecision, manual_route
+from rpent.memory.memcodex.recovery import covers, recovery_cases, requirements
 
 if TYPE_CHECKING:
     from rpent.memory.memcodex.controller import MemCodexController, RetrievalResult
@@ -73,6 +74,7 @@ def retrieve_indexed(
     recovery = bool(
         state.get("needs_recovery") or state.get("anomaly") or purpose == "recover"
     )
+    required_recovery = requirements(state) if recovery else ()
     localized = set(observation.get("localized_objects", ()))
     required = set(profile["required_skills"])
     required_objects = profile["required_objects"]
@@ -158,6 +160,13 @@ def retrieve_indexed(
                 missing.append("skill_guidance")
             if recovery and not any("recovery" in m["provides"] for m in usable):
                 missing.append("recovery_guidance")
+            for kind in required_recovery:
+                if not any(
+                    covers(case, kind, state)
+                    for m in usable
+                    for case in m.get("recovery_cases", ())
+                ):
+                    missing.append(f"recovery_case:{kind}")
         if not usable:
             missing.append("applicable_memory")
         return tuple(missing)
@@ -173,6 +182,14 @@ def retrieve_indexed(
         info = {
             "task": task,
             "task_language": profile["language"],
+            "context_objects": profile.get("context_objects", []),
+            "drawer_goal": profile.get("drawer_goal"),
+            "recovery_requirements": list(required_recovery),
+            "failure_context": {
+                key: state[key]
+                for key in ("failure_kind", "failure_object", "phase")
+                if state.get(key)
+            },
             "purpose": purpose,
             "required_objects": required_objects,
             "required_skills": profile["required_skills"]
@@ -291,6 +308,9 @@ def retrieve_indexed(
                     continue
                 seen_paths.add(metadata["path"])
                 entry = corpus.read(metadata)
+                # Derive from the actual hash-checked body even with a legacy
+                # index; untrusted metadata alone cannot certify coverage.
+                metadata = {**metadata, "recovery_cases": recovery_cases(entry.text)}
                 reads += 1
                 layer_reads += 1
                 text = entry.render()

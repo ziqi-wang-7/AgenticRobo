@@ -45,6 +45,17 @@ class ActionCandidate(BaseModel):
     args: dict[str, Any]
     roles: dict[str, str]
     expected_effect: str | None = None
+    drawer: DrawerAction | None = None
+
+
+class DrawerAction(BaseModel):
+    """A proposed drawer contact, not a claim about measured drawer state."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    target_level: Literal["top", "middle", "bottom"]
+    operation: Literal["open", "close"]
+    stage: Literal["approach", "engage", "actuate", "disengage"]
+    direction: Literal["outward", "inward"]
 
 
 class ActionVisualCheck(BaseModel):
@@ -52,10 +63,13 @@ class ActionVisualCheck(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    fact: Literal["holding", "placement_ready"]
+    fact: Literal[
+        "holding", "placement_ready", "handle_level", "contact_ready", "access_clear"
+    ]
     object_id: str
     step: int
     artifact: str
+    value: str | bool | None = None
 
 
 def build_action_query(
@@ -67,6 +81,7 @@ def build_action_query(
     localizations: Mapping[str, dict[str, Any]],
     artifacts: Collection[str],
     visual_checks: Sequence[ActionVisualCheck],
+    drawer_goal: Mapping[str, str] | None = None,
 ) -> tuple[dict[str, Any], ActionQuery]:
     """Validate a proposal and create immutable facts without executing the tool.
 
@@ -82,10 +97,17 @@ def build_action_query(
     Returns:
         A normalized proposal for the audit and an immutable routing query.
     """
-    required_roles = _ROLE_REQUIREMENTS.get(candidate.tool)
+    drawer = candidate.drawer
+    required_roles = ("handle",) if drawer else _ROLE_REQUIREMENTS.get(candidate.tool)
     primitive = tools.get(candidate.tool)
     if required_roles is None or primitive is None or primitive.readonly:
         raise ValueError(f"Unsupported action evidence primitive: {candidate.tool}")
+    if drawer:
+        if candidate.tool not in {"pi0_doubled", "move_pose", "move_to"}:
+            raise ValueError("Drawer candidates require a contact or pose primitive")
+        direction = "outward" if drawer.operation == "open" else "inward"
+        if drawer.direction != direction:
+            raise ValueError("Drawer direction conflicts with requested operation")
     if set(candidate.roles) != set(required_roles):
         raise ValueError(
             f"{candidate.tool} requires roles: {', '.join(required_roles)}"
@@ -94,13 +116,32 @@ def build_action_query(
         raise ValueError("Candidate roles must use current task object IDs")
     if len(set(candidate.roles.values())) != len(required_roles):
         raise ValueError("Candidate roles require distinct task object IDs")
+    if drawer:
+        handle = candidate.roles["handle"]
+        expected_handle = f"{drawer.target_level}_drawer_handle"
+        if handle != expected_handle and not (
+            handle == "drawer_handle"
+            and drawer_goal
+            and drawer_goal.get("level") == drawer.target_level
+        ):
+            raise ValueError(
+                "Drawer handle identity must match its explicit target level"
+            )
 
     parameters = primitive.args_schema.model_validate(candidate.args, strict=True)
     args = parameters.model_dump(mode="json")
-    if candidate.tool == "move_to" and args["gripper"] != 1.0:
+    if not drawer and candidate.tool == "move_to" and args["gripper"] != 1.0:
         raise ValueError("Transport move_to requires gripper=1.0")
 
-    if candidate.tool == "pi0_pick":
+    if drawer:
+        geometry_object = candidate.roles["handle"]
+        claim_keys = (
+            f"handle_level:{geometry_object}",
+            f"access_clear:{geometry_object}",
+        )
+        if drawer.stage == "actuate":
+            claim_keys += (f"contact_ready:{geometry_object}",)
+    elif candidate.tool == "pi0_pick":
         geometry_object = candidate.roles["target_object"]
         claim_keys = ()
     else:
@@ -140,6 +181,14 @@ def build_action_query(
             or check.artifact not in artifacts
         ):
             raise ValueError(f"Visual check requires a current camera artifact: {key}")
+        if check.fact == "handle_level" and (
+            not drawer or check.value != drawer.target_level
+        ):
+            raise ValueError("Observed handle level conflicts with drawer candidate")
+        if check.fact in {"contact_ready", "access_clear"} and check.value is not True:
+            raise ValueError(
+                "Drawer positive checks require value=true; report failures separately"
+            )
         seen_claims.add(key)
         facts.append(
             ActionFact(
@@ -150,7 +199,7 @@ def build_action_query(
             )
         )
 
-    normalized = {**candidate.model_dump(), "args": args}
+    normalized = {**candidate.model_dump(exclude_none=True), "args": args}
     fingerprint = hashlib.sha256(
         _canonical_json({"step": step, "candidate": normalized}).encode()
     ).hexdigest()

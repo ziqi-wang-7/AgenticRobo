@@ -80,7 +80,10 @@ def test_online_empty_localizations_do_not_discard_recovery_issue(online):
     trace = json.loads((config.output_dir / "m2-retrievals.jsonl").read_text())
     assert trace["state"]["issue"] == "insertion stalled at roof"
     assert trace["state"]["last_action"] == "move_to"
-    assert trace["memory_read_complete"]
+    # A milk-slip remedy does not cover blocked microwave insertion.
+    assert not trace["memory_read_complete"]
+    assert "recovery_case:insertion_blocked" in trace["memory_missing"]
+    assert trace["layers_visited"][-1] == "raw"
     assert trace["state_missing"] == ["object_localization"]
     assert trace["state"]["needs_recovery"]
     assert "If the milk slips" in trace["context"]
@@ -181,7 +184,8 @@ def test_narrow_never_overrides_rejection_or_applicability(indexed):
     assert blocked not in result.selected_ids and rejected not in result.selected_ids
     assert "skills/blocked.json" not in result.files_opened
     assert "skills/rejected.json" not in result.files_opened
-    assert result.memory_read_complete
+    assert not result.memory_read_complete
+    assert "recovery_case:unclassified" in result.memory_missing
 
 
 def test_source_links_include_skipped_layers_and_raw_but_not_other_sources(indexed):
@@ -218,6 +222,7 @@ def test_frozen_v1_index_still_valid_and_does_not_need_corpus_rewrite(indexed):
     data.pop("source_links")
     for entry in data["entries"].values():
         entry.pop("issue_tags")
+        entry.pop("recovery_cases")
     index.write_bytes(encoded(data))
     assert validate_index(root, index)["status"] == "passed"
     result = m2.query(m2.controller(indexed), localized=False, purpose="recover")

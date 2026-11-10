@@ -624,6 +624,12 @@ applicable_entries in your next call at the same step. Analogies are explicitly
 marked different tasks; obey the CURRENT task_language, never replace its goal
 with a reference goal. On a failed grasp or observed anomaly, use purpose="recover"
 and describe the observed issue, supplying fresh localizations as needed.
+When possible include failure={kind, object_id, phase, step, artifact} using a
+current saved camera image. Distinguish grasp_not_closed, object_slipped,
+insertion_blocked, release_stuck, wrong_drawer and contact_stalled. A recovery
+label alone is not coverage: memory_missing may name recovery_case:<kind>.
+An unresolved case continues toward raw; if still uncovered, report the gap
+instead of treating a historical generic retry as a verified solution.
 
 sufficient only describes rule-based information coverage; it does not certify
 a correct grasp or task success. Inspect images and native terminated as usual.
@@ -639,10 +645,34 @@ pi0_pick, closed-gripper transport move_to, or release, include candidate in an
 existing execute/recover retrieval: {tool, args, roles, expected_effect?}.
 For pi0_pick, roles is {target_object: <task object ID>}. For transport move_to
 and release, roles is {held_object: <ID>, destination: <distinct ID>}; transport
-move_to must explicitly use gripper=1.0. Other primitives use ordinary retrieval
+move_to must explicitly use gripper=1.0. Primitives outside these and the drawer contract below use ordinary retrieval
 without candidate only if guidance is needed. Reuse the pick guidance for its
 empty-gripper approach; do not add a separate full-task retrieval just for that
 approach. expected_effect is descriptive and cannot establish a fact.
+
+Drawer candidates support pi0_doubled, move_pose and move_to with roles={handle:
+<level>_drawer_handle} and drawer={target_level: "top"|"middle"|"bottom",
+operation: "open"|"close", stage: "approach"|"engage"|"actuate"|"disengage",
+direction: "outward"|"inward"}. Opening is outward; closing is inward relative
+to the cabinet, not a fixed world-axis sign. Use the context_objects IDs from
+overview. drawer_handle is an alias only for the task's goal level. Recovery
+on a different drawer must use that level's explicit handle ID and fresh geometry.
+Bind current handle localization; check handle_level (value=<level>) and
+access_clear (value=true) in visual_checks. Before an actuating push/pull also
+check contact_ready (value=true). These checks remain image-attributed claims.
+For pi0_doubled prompt the selected drawer explicitly. If two contact attempts
+produce no opening/closing progress, inspect engagement/clearance and retrieve a
+different applicable approach or wrist-pose recovery before repeating them.
+After each drawer primitive compare before/after images. You can include
+drawer_progress={previous_step, step, artifact, target_level, observed_level,
+expected_direction, observed_direction} in retrieval. Levels are top/middle/bottom
+(observed_level may be unknown); directions are outward/inward (observed_direction
+may be none/unknown). Wrong-level motion or no progress triggers recovery reading;
+do not equate pi0_doubled.success=false with an intermediate contact failure.
+Before transport, verify that the held object follows a short lift; continue
+checking relative motion during carry. A finger gap alone does not prove holding.
+After slipping, report object_slipped and choose a new applicable grasp/contact
+strategy from current geometry rather than repeating an open-finger remedy.
 
 Bind the candidate's target or destination to its current back_project/segment
 memory_evidence_id via localizations. Only geometry provenance is verified;

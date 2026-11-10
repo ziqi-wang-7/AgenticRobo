@@ -32,6 +32,13 @@ from robots.libero.action_evidence import (
     build_action_query,
 )
 from robots.libero.memcodex import SOURCE_REVISION
+from robots.libero.recovery_evidence import (
+    DrawerProgress,
+    FailureObservation,
+    drawer_progress_failure,
+    motion_alert,
+    validate_failure,
+)
 from robots.libero.toolkit import LiberoToolkit
 from rpent.memory.memcodex import MemCodexController
 from rpent.memory.memcodex.adapter import FixedMemoryManager
@@ -175,6 +182,19 @@ class M2LiberoToolkit(LiberoToolkit):
                 data["memory_evidence_id"] = evidence_id
         return result
 
+    def _execute_primitive(self, name: str, handler: Any, **kwargs: Any) -> ToolResult:
+        response = super()._execute_primitive(name, handler, **kwargs)
+        record = self._state.latest_record()
+        if record and not record.terminated:
+            alert = motion_alert(record)
+            if alert or name == "pi0_doubled":
+                response.data["progress_check"] = {
+                    "step": record.step_idx,
+                    "servo_residual_exceeded": bool(alert),
+                    "instruction": "Inspect target identity and before/after progress. For drawers check the specific level and opening/closing direction. After wrong-level motion, blocked contact or no progress, call retrieve_memory with purpose=recover, current failure/drawer_progress and fresh geometry before repeating the maneuver. Servo residual alone does not identify a collision.",
+                }
+        return response
+
     @tool(readonly=True)
     def retrieve_memory(
         self,
@@ -186,6 +206,8 @@ class M2LiberoToolkit(LiberoToolkit):
         candidate: ActionCandidate | None = None,
         visual_checks: list[ActionVisualCheck] | None = None,
         rejected_entries: list[str] | None = None,
+        failure: FailureObservation | None = None,
+        drawer_progress: DrawerProgress | None = None,
     ) -> ToolResult:
         """Read task experience from summary through raw evidence only as needed.
 
@@ -198,6 +220,8 @@ class M2LiberoToolkit(LiberoToolkit):
             candidate: Optional proposed primitive and task-object roles. Retrieves evidence without executing it.
             visual_checks: Planner-attributed holding or placement checks tied to a recorded current image.
             rejected_entries: Previously returned entry IDs found inapplicable for this step and candidate.
+            failure: Specific current image-attributed failure, with object, phase and artifact.
+            drawer_progress: Before/after drawer level and direction from consecutive recorded images.
         """
         with self._memory_lock:
             record = self._state.latest_record()
@@ -208,7 +232,10 @@ class M2LiberoToolkit(LiberoToolkit):
             memory = self.memory
             profile = memory.controller.indexed.profile(memory.record["task"])
             bindings = localizations or {}
-            if not set(bindings) <= set(profile["required_objects"]):
+            objects = set(profile["required_objects"]) | set(
+                profile.get("context_objects", ())
+            )
+            if not set(bindings) <= objects:
                 raise ValueError("Use required_objects IDs returned by overview")
             if len(set(bindings.values())) != len(bindings):
                 raise ValueError(
@@ -228,7 +255,8 @@ class M2LiberoToolkit(LiberoToolkit):
                     ActionCandidate.model_validate(candidate, strict=True),
                     tools=self._tools,
                     step=step,
-                    task_objects=profile["required_objects"],
+                    task_objects=objects,
+                    drawer_goal=profile.get("drawer_goal"),
                     localizations=evidence,
                     artifacts=record.artifacts,
                     visual_checks=[
@@ -253,7 +281,37 @@ class M2LiberoToolkit(LiberoToolkit):
             failed = bool(
                 result.get("error")
                 or (action == "pi0_pick" and result.get("success") is False)
+                or motion_alert(record)
             )
+            failure_state = {}
+            if failure is not None:
+                failure = FailureObservation.model_validate(failure, strict=True)
+                failure_state = validate_failure(failure, record, objects)
+            progress_data = None
+            if drawer_progress is not None:
+                if not profile.get("drawer_goal"):
+                    raise ValueError("Drawer progress requires a drawer task")
+                drawer_progress = DrawerProgress.model_validate(
+                    drawer_progress, strict=True
+                )
+                kind = drawer_progress_failure(
+                    drawer_progress,
+                    record,
+                    self._state.get(drawer_progress.previous_step),
+                )
+                progress_data = drawer_progress.model_dump()
+                if kind:
+                    if failure_state and failure_state["failure_kind"] != kind:
+                        raise ValueError(
+                            "Failure observation conflicts with drawer progress"
+                        )
+                    failure_state = {
+                        "failure_kind": kind,
+                        "failure_object": f"{drawer_progress.target_level}_drawer_handle",
+                        "phase": "articulate",
+                    }
+            if not failure_state and not issue.strip() and motion_alert(record):
+                failure_state = {"failure_kind": "contact_stalled"}
             observation = {
                 "task_language": record.extras.get("task_language"),
                 "localized_objects": sorted(evidence),
@@ -261,11 +319,12 @@ class M2LiberoToolkit(LiberoToolkit):
             state = {
                 "purpose": purpose,
                 "available_skills": sorted(self._tools),
-                "needs_recovery": failed or purpose == "recover",
+                "needs_recovery": failed or bool(failure_state) or purpose == "recover",
                 "anomaly": bool(issue),
                 "issue": issue,
                 "last_action": action,
                 "applicable_entries": sorted(confirmed),
+                **failure_state,
             }
             if rejected:
                 state["rejected_entries"] = sorted(rejected)
@@ -289,6 +348,8 @@ class M2LiberoToolkit(LiberoToolkit):
                 "issue_source": "planner",
                 "last_action": action,
                 "last_action_failed": failed,
+                "failure_observation": failure.model_dump() if failure else None,
+                "drawer_progress": progress_data,
                 "terminated": record.terminated,
                 "truncated": record.truncated,
                 "response_sha256": hashlib.sha256(

@@ -476,11 +476,12 @@ usage, latency and native success separately from retrieval coverage.
 
 ### Source-linked descent and narrowing
 
-New indexes use schema 2 and store `source_links` plus bounded `issue_tags`.
+New indexes use schema 3 and store `source_links`, bounded `issue_tags`, and
+source-derived `recovery_cases`.
 Links connect entries citing the same source file to entries in deeper layers;
 line references remain available for audit. These are provenance links, not a
 semantic relation graph or proof of applicability. The reader verifies the
-links against entry provenance. Frozen schema-1 indexes remain readable and
+links against entry provenance. Frozen schema-1 and schema-2 indexes remain readable and
 validatable: links are derived from metadata without rewriting the corpus, but
 failure-topic tags require a schema-2 rebuild. Use a new output path as above;
 the builder refuses to overwrite a different existing index.
@@ -509,3 +510,66 @@ Offline acceptance checks (no GPT, VLA or simulator):
 .venv/bin/python -m pytest tests/unit_tests/rpent/memory \
   tests/unit_tests/robots/libero/test_action_evidence_contracts.py -q
 ```
+
+
+### Specific failures and drawer evidence
+
+Recovery sufficiency checks the particular failure (`object_slipped`,
+`grasp_not_closed`, `wrong_drawer`, `contact_stalled`, `insertion_blocked`, or
+`release_stuck`), with object category and phase when supplied. A source passage
+must describe both the symptom and a response; a generic recovery tag is not
+coverage. These conservative text rules can miss useful guidance. Unrecognized
+issues are reported as uncovered. Insufficient evidence widens and descends to
+raw within the existing file/token limits, then reports any remaining gap.
+Bodies and conditions remain unchanged; no extra LLM judge or online update is
+used. Current state, historical coverage, and native task success stay separate.
+
+`retrieve_memory` accepts `failure={kind, object_id, phase, step, artifact}`.
+It rejects stale/unrecorded images and unknown objects. This is an attributed
+planner observation, not a simulator assertion. Servo residual alerts compare
+against that command's tolerance and budget; contact `success=false` alone does
+not establish intermediate failure.
+
+Drawer candidates use `pi0_doubled`, `move_pose`, or `move_to`,
+`roles={handle: "bottom_drawer_handle"}`, and
+`drawer={target_level: "bottom", operation: "open", stage: "actuate",
+direction: "outward"}`. Other supported levels are `top` and `middle`.
+Use `context_objects` from overview; `drawer_handle` aliases only the task's
+own goal level. The contract requires fresh handle geometry, level and access
+claims; an actuating push/pull additionally requires a contact claim.
+`visual_checks` uses `handle_level` with the level as `value`, or `access_clear`
+and `contact_ready` with `value=true`. Claims remain unverified by design.
+
+`drawer_progress` compares consecutive saved images using `previous_step`,
+`step`, `artifact`, `target_level`, `observed_level`, `expected_direction`, and
+`observed_direction`. A wrong level, reversed direction, or reported no movement
+requests recovery. Unknown evidence never certifies progress. This does not
+supply a grasp controller or automatically interpret camera pixels.
+
+### Frozen initial scenes for paired runs
+
+`seed` and a pruned state alone do not restore fixed fixture poses. Record a
+private snapshot and verify it in an independent environment process before
+running the planner (requires the installed LIBERO-PRO/EGL environment):
+
+```bash
+python -m repro.freeze_libero_scene record /absolute/scenes/goal-t0.npz \
+  --suite libero_goal_task --task 0 --seed 1 --cuda-device 1 \
+  --receipt /absolute/scenes/goal-t0-record.json
+python -m repro.freeze_libero_scene restore /absolute/scenes/goal-t0.npz \
+  --suite libero_goal_task --task 0 --seed 1 --cuda-device 1 \
+  --receipt /absolute/scenes/goal-t0-verified.json
+```
+
+Pass `--initial-scene /absolute/scenes/goal-t0.npz` to each evaluation arm.
+This opt-in adapter seeds global samplers in the worker, freezes MuJoCo
+integration state and fixed-body transforms before ordinary settling, and
+rejects changed task/native init state, simulator version or other model arrays.
+After settling it checks recorded raw observations, both RGB-D cameras and
+calibration before planner control. Physics, depth and calibration must match
+exactly. RGB permits at most a one-level uint8 rounding difference in 0.01% of
+color channels; the receipt records any such difference. Snapshots remain outside the planner's file
+boundary. The run writes only a hash receipt to `initial-scene-validation.json`.
+Recording cannot overwrite an existing snapshot. Use the same validated snapshot
+and simulator dependencies for both arms; equal initial state does not make an
+online planner's decisions deterministic.

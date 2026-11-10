@@ -24,6 +24,7 @@ from pathlib import Path
 from repro.memcodex_corpus import HISTORICAL, cell_key, digest, encoded, validate
 from rpent.memory.memcodex.hierarchy import LAYERS
 from rpent.memory.memcodex.lineage import issue_tags, source_links
+from rpent.memory.memcodex.recovery import recovery_cases
 
 
 def task_requirements(language: str) -> dict:
@@ -88,10 +89,25 @@ def task_requirements(language: str) -> dict:
         skills.append("pi0_doubled")
     if re.search(r"\bpush\b", language, re.I):
         skills.append("move_to")
-    return {
+    result = {
         "required_objects": sorted(set(objects)),
         "required_skills": sorted(set(skills)),
     }
+    if "drawer_handle" in objects:
+        match = re.search(r"\b(top|upper|middle|bottom|lower)\b", language, re.I)
+        level = (
+            {"upper": "top", "lower": "bottom"}.get(match[0].lower(), match[0].lower())
+            if match
+            else None
+        )
+        result["drawer_goal"] = {
+            "level": level,
+            "operation": "close" if re.search(r"\bclose\b", language, re.I) else "open",
+        }
+        result["context_objects"] = [
+            f"{level}_drawer_handle" for level in ("top", "middle", "bottom")
+        ]
+    return result
 
 
 def build_index(root: Path) -> dict:
@@ -164,6 +180,7 @@ def build_index(root: Path) -> dict:
             ),
             "source_refs": data["source_refs"],
             "issue_tags": issue_tags(data["text"]),
+            "recovery_cases": recovery_cases(data["text"]),
         }
         entries[name] = entry
         for task in bindings & tasks.keys():
@@ -194,9 +211,9 @@ def build_index(root: Path) -> dict:
                             }
                         )
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": "m2",
-        "version": "m2-index-v2",
+        "version": "m2-index-v3",
         "source_links": source_links(entries),
         "corpus_manifest_sha256": digest((root / "MANIFEST.json").read_bytes()),
         "source_revision": manifest["source_revision"],
@@ -209,6 +226,14 @@ def validate_index(root: Path, index_path: Path) -> dict:
     """Rebuild metadata, task bindings and source hashes to detect stale indexes."""
     actual = json.loads(index_path.read_text())
     expected = build_index(root)
+    if actual.get("schema_version") in {1, 2}:
+        version = actual["schema_version"]
+        expected.update(schema_version=version, version=f"m2-index-v{version}")
+        for entry in expected["entries"].values():
+            entry.pop("recovery_cases")
+        for task in expected["tasks"].values():
+            task.pop("drawer_goal", None)
+            task.pop("context_objects", None)
     if actual.get("schema_version") == 1:
         # Preserve frozen v1 runs; the reader derives their source links in memory.
         expected.update(schema_version=1, version="m2-index-v1")

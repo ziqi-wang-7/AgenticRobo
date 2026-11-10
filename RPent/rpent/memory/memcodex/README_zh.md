@@ -361,10 +361,10 @@ controller = MemCodexController(
 
 ### 沿来源展开与缩小检索范围
 
-新索引使用 schema 2，保存 `source_links` 和有限的失败主题 `issue_tags`。
+新索引使用 schema 3，保存 `source_links`、有限的失败主题 `issue_tags` 和由原文提取的 `recovery_cases`。
 来源链接将引用同一源文件的条目连接到更深层条目，原文行号继续保留用于审计。
 这些是来源关联，不是语义关系图，也不证明经验适用。读取器会按条目来源核对链接。
-冻结的 schema-1 索引仍可读取和校验：来源关联由元数据推导，不改写语料；失败主题
+冻结的 schema-1/schema-2 索引仍可读取和校验：来源关联由元数据推导，不改写语料；失败主题
 需要重新构建 schema-2 索引。请使用上方命令的新输出路径，转换器拒绝覆盖不同索引。
 
 下降前，`NARROW` 可以先选择有来源关联的条目，再根据当前原语与恢复问题缩小范围。
@@ -385,3 +385,56 @@ controller = MemCodexController(
 .venv/bin/python -m pytest tests/unit_tests/rpent/memory \
   tests/unit_tests/robots/libero/test_action_evidence_contracts.py -q
 ```
+
+
+### 具体故障覆盖与抽屉证据
+
+恢复充分性分别检查 `object_slipped`（滑脱）、`grasp_not_closed`（未闭合）、
+`wrong_drawer`（错误层级）、`contact_stalled`（接触无进展）、`insertion_blocked`
+（插入受阻）和 `release_stuck`（释放后仍勾连），并在提供时核对物体类别、操作阶段。
+原文片段必须同时包含故障症状和应对措施；泛化的 recovery 标签不算具体覆盖。
+这些保守文本规则可能漏掉有效经验；未知故障会明确报告为未覆盖。覆盖不足时在现有
+文件数和 Token 预算内扩大范围并下降到 raw，耗尽后仍保留缺口，不将充分性等同于成功。
+记忆正文和适用条件保持不变，不新增 LLM 判断调用或在线更新。
+
+`retrieve_memory` 接受 `failure={kind, object_id, phase, step, artifact}`，
+拒绝过期图像、未保存图像和未知物体。它记录 Planner 的当前视觉判断，不作为仿真真值。
+伺服告警只检查该命令自身的容差与步数预算；接触技能的 `success=false` 不自动代表
+中间操作失败。
+
+抽屉候选支持 `pi0_doubled`、`move_pose`、`move_to`，例如
+`roles={handle: "bottom_drawer_handle"}`，配合
+`drawer={target_level: "bottom", operation: "open", stage: "actuate", direction: "outward"}`。
+其他层级为 top、middle；使用 overview 返回的 context_objects。
+`drawer_handle` 只指当前任务目标层，纠正其他抽屉必须使用明确层级 ID。
+需要当前把手定位、层级和通路判断，实际推拉还需要接触判断。
+visual_checks 中 handle_level 的 value 为层级，access_clear/contact_ready 的 value 为 true；
+这些均保留为未独立验证的视觉声明。
+
+`drawer_progress` 使用 previous_step、step、artifact、target_level、observed_level、
+expected_direction、observed_direction 比较相邻动作前后图像。错误层级、反向运动或
+报告无移动会请求恢复检索；unknown 不证明有进展。该接口不提供新的抓取控制器，也不自动
+理解图像像素。
+
+### 配对实验的冻结初态
+
+仅 seed 和 pruned 状态不能还原固定柜体等位姿。先在已配置的 LIBERO-PRO/EGL 环境中
+记录私有快照，再用独立进程验证，整个过程不调用 Planner 或 VLA：
+
+```bash
+python -m repro.freeze_libero_scene record /absolute/scenes/goal-t0.npz \
+  --suite libero_goal_task --task 0 --seed 1 --cuda-device 1 \
+  --receipt /absolute/scenes/goal-t0-record.json
+python -m repro.freeze_libero_scene restore /absolute/scenes/goal-t0.npz \
+  --suite libero_goal_task --task 0 --seed 1 --cuda-device 1 \
+  --receipt /absolute/scenes/goal-t0-verified.json
+```
+
+两组评测均传入 `--initial-scene /absolute/scenes/goal-t0.npz`。
+这个可选适配器在 worker 内固定全局采样器，在正常静置步骤前冻结 MuJoCo 积分状态和固定物体
+变换，任务、原始初态、仿真版本或其他模型数组改变时拒绝启动。
+静置后检查原始观测、双相机 RGB-D 和标定，再交给 Planner。物理状态、深度和标定必须
+完全一致。RGB 只允许至多 0.01% 的颜色通道有 1 个 uint8 灰度级的舍入差异，并记录到凭证。
+快照位于 Planner 文件边界之外，回合内只写入 `initial-scene-validation.json` 哈希凭证。
+记录模式拒绝覆盖已有快照。两组必须共用验证过的快照和仿真依赖；相同初态不保证在线
+Planner 的动作决策相同。
