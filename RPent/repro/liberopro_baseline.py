@@ -348,11 +348,13 @@ def run(batch: Path) -> None:
     output = batch / "episodes"
     output.mkdir(exist_ok=True)
     deployment = plan["deployment"]
+    # RLinf is installed in the selected interpreter. Treating its whole
+    # site-packages directory as a checkout changes LIBERO asset paths when
+    # ProcessDaemon resolves a symlinked virtualenv, breaking frozen resets.
     env = {
         **os.environ,
         "RPENT_REPO_ROOT": str(ROOT),
         "PYTHONPATH": str(ROOT),
-        "RPENT_RLINF_ROOT": str(ROOT / ".venv/lib/python3.11/site-packages"),
         "LIBERO_TYPE": "pro",
         "LIBERO_CONFIG_PATH": str(ROOT / "repro/assets/libero-pro/config"),
         "LIBERO_PRO_ASSET_PATH": str(ROOT / "repro/assets/libero-pro/tree"),
