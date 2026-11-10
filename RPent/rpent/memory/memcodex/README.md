@@ -483,7 +483,8 @@ line references remain available for audit. These are provenance links, not a
 semantic relation graph or proof of applicability. The reader verifies the
 links against entry provenance. Frozen schema-1 and schema-2 indexes remain readable and
 validatable: links are derived from metadata without rewriting the corpus, but
-failure-topic tags require a schema-2 rebuild. Use a new output path as above;
+Failure-topic tags are available in schema 2 and 3; the current rebuild emits
+schema 3, including the structured recovery cases. Use a new output path as above;
 the builder refuses to overwrite a different existing index.
 
 Before descending, `NARROW` can restrict the next layer to source-linked entries
