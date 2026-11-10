@@ -106,6 +106,9 @@ def make_env(
     seed: int,
     suite_name: str = "libero_spatial",
     max_episode_steps: int = 10000,
+    *,
+    initial_scene: str | None = None,
+    scene_mode: str = "restore",
 ) -> LiberoEnv:
     """Build a single-env LiberoEnv pinned to ``task_id`` / ``seed``."""
     from rlinf.envs.sim.libero.libero_env import LiberoEnv
@@ -127,7 +130,33 @@ def make_env(
         seed=seed,
         max_episode_steps=max_episode_steps,
     )
-    return LiberoEnv(
+    environment_class = LiberoEnv
+    if initial_scene is not None:
+        from functools import partial
+
+        from robots.libero.initial_scene import seeded_scene_factory
+
+        class FrozenSceneEnv(LiberoEnv):
+            def get_env_fns(self):
+                return [
+                    partial(
+                        seeded_scene_factory,
+                        factory,
+                        seed=seed,
+                        path=initial_scene,
+                        mode=scene_mode,
+                        identity={
+                            "suite": suite_name,
+                            "task": task_id,
+                            "seed": seed,
+                            "variant": os.environ.get("LIBERO_TYPE", "standard"),
+                        },
+                    )
+                    for factory in super().get_env_fns()
+                ]
+
+        environment_class = FrozenSceneEnv
+    return environment_class(
         cfg=cfg, num_envs=1, seed_offset=0, total_num_processes=1, worker_info=None
     )
 
@@ -146,7 +175,15 @@ class LiberoEnvFacade(BaseEnvFacade):
     trip.
     """
 
-    def __init__(self, env: LiberoEnv, *, meta: dict):
+    def __init__(
+        self,
+        env: LiberoEnv,
+        *,
+        meta: dict,
+        initial_scene: str | None = None,
+        scene_mode: str = "restore",
+        scene_receipt: str | None = None,
+    ):
         self._env = env
         self._env_idx = 0
         self._closed = False
@@ -154,6 +191,9 @@ class LiberoEnvFacade(BaseEnvFacade):
         # client compares against its own expected values at construction
         # and refuses to talk to a stale or mis-configured server.
         self._meta = dict(meta)
+        self._initial_scene = initial_scene
+        self._scene_mode = scene_mode
+        self._scene_receipt = scene_receipt
         super().__init__()
 
     def _register_rpc(self) -> None:
@@ -196,6 +236,12 @@ class LiberoEnvFacade(BaseEnvFacade):
 
     def reset(self):
         obs, info = self._env.reset()
+        if self._initial_scene:
+            from robots.libero.initial_scene import validate_observation
+
+            validate_observation(
+                self, self._initial_scene, self._scene_mode, self._scene_receipt
+            )
         obs = self._strip_obs(to_numpy_tree(obs))
         return obs, to_numpy_tree(info)
 
@@ -345,6 +391,14 @@ def main():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--max-episode-steps", type=int, default=10000)
     p.add_argument(
+        "--initial-scene",
+        help="Private frozen reset snapshot, restored before settling.",
+    )
+    p.add_argument("--scene-mode", choices=("record", "restore"), default="restore")
+    p.add_argument(
+        "--scene-receipt", help="Write hashes proving the settled RGB-D/state match."
+    )
+    p.add_argument(
         "--parent-watch",
         action="store_true",
         help="watch parent process via stdin pipe and exit when it dies",
@@ -391,6 +445,8 @@ def main():
         args.seed,
         suite_name=args.suite,
         max_episode_steps=args.max_episode_steps,
+        initial_scene=args.initial_scene,
+        scene_mode=args.scene_mode,
     )
     facade = LiberoEnvFacade(
         raw_env,
@@ -400,6 +456,9 @@ def main():
             "seed": args.seed,
             "max_episode_steps": args.max_episode_steps,
         },
+        initial_scene=args.initial_scene,
+        scene_mode=args.scene_mode,
+        scene_receipt=args.scene_receipt,
     )
     try:
         facade.serve(

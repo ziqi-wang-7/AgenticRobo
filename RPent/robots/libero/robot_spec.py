@@ -232,6 +232,11 @@ def _add_cli_args(parser: argparse.ArgumentParser, use_dashboard: bool) -> None:
     )
     parser.add_argument("--max-episode-steps", type=int, default=10000)
     parser.add_argument(
+        "--initial-scene",
+        type=Path,
+        help="Restore a validated private initial-scene snapshot before evaluation.",
+    )
+    parser.add_argument(
         "--libero-type",
         default=None,
         choices=["standard", "pro", "plus"],
@@ -320,6 +325,15 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         raise ValueError("--suite is required")
     if args.task is None:
         raise ValueError("--task is required")
+    if getattr(args, "initial_scene", None):
+        if args.env_endpoint is not None:
+            raise ValueError("--initial-scene requires an owned environment")
+        scene = args.initial_scene.expanduser().resolve()
+        if not scene.is_file() or not scene.with_suffix(".observation.json").is_file():
+            raise ValueError(
+                "--initial-scene requires a snapshot and settled observation reference"
+            )
+        args.initial_scene = scene
     planner = getattr(args, "planner", None)
     if planner == "flash":
         if getattr(args, "explore", False):
@@ -451,6 +465,16 @@ def _spawn_env_server(
             "--port",
             str(port),
             "--parent-watch",
+            *(
+                [
+                    "--initial-scene",
+                    str(args.initial_scene),
+                    "--scene-receipt",
+                    str(output_dir / "initial-scene-validation.json"),
+                ]
+                if getattr(args, "initial_scene", None)
+                else []
+            ),
             *_cuda_args(args),
         ],
         env_overrides={

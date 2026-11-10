@@ -56,6 +56,19 @@ def sha(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def validate_scenes(plan: dict) -> None:
+    """Check every private reset input, including the rendered reference."""
+    for cell in plan["episodes"]:
+        if not cell.get("initial_scene"):
+            continue
+        scene = Path(cell["initial_scene"])
+        expected = cell["initial_scene_sha256"]
+        for suffix in (".npz", ".observation.json", ".cameras.npz"):
+            path = scene.with_suffix(suffix)
+            if sha(path) != expected[suffix]:
+                raise RuntimeError(f"Frozen initial scene changed: {path}")
+
+
 def command(batch: Path, cell: dict, deployment: dict) -> list[str]:
     """Use the original CLI flags, with only an observation wrapper."""
     argv = [
@@ -104,6 +117,8 @@ def command(batch: Path, cell: dict, deployment: dict) -> list[str]:
         str(batch / "episodes" / cell["episode_id"]),
     ]
     plan_path = batch / "plan.json"
+    if cell.get("initial_scene"):
+        argv.extend(["--initial-scene", cell["initial_scene"]])
     if plan_path.exists():
         plan = json.loads(plan_path.read_text())
         if plan.get("memcodex_enabled"):
@@ -300,6 +315,7 @@ def run(batch: Path) -> None:
     from rpent.utils.rpc.client_utils import make_rpc_client, wait_for_ready
 
     plan = json.loads((batch / "plan.json").read_text())
+    validate_scenes(plan)
     for name, digest in plan["source_sha256"].items():
         if sha(ROOT / name) != digest:
             raise RuntimeError(f"Frozen source changed: {name}")
@@ -459,6 +475,7 @@ def run(batch: Path) -> None:
             for name, digest in plan["source_sha256"].items():
                 if sha(ROOT / name) != digest:
                     raise RuntimeError(f"Frozen source changed: {name}")
+            validate_scenes({"episodes": [cell]})
             write(services / "current-episode.json", cell)
             write(
                 batch / "status.json",
