@@ -83,7 +83,8 @@ def test_online_empty_localizations_do_not_discard_recovery_issue(online):
     # A milk-slip remedy does not cover blocked microwave insertion.
     assert not trace["memory_read_complete"]
     assert "recovery_case:insertion_blocked" in trace["memory_missing"]
-    assert trace["layers_visited"][-1] == "raw"
+    assert trace["layers_visited"][-1] == "skills"
+    assert trace["routing_steps"][-1]["action"] == "EXHAUSTED"
     assert trace["state_missing"] == ["object_localization"]
     assert trace["state"]["needs_recovery"]
     assert "If the milk slips" in trace["context"]
@@ -185,7 +186,7 @@ def test_narrow_never_overrides_rejection_or_applicability(indexed):
     assert "skills/blocked.json" not in result.files_opened
     assert "skills/rejected.json" not in result.files_opened
     assert not result.memory_read_complete
-    assert "recovery_case:unclassified" in result.memory_missing
+    assert "unclassified_issue" in result.memory_missing
 
 
 def test_source_links_include_skipped_layers_and_raw_but_not_other_sources(indexed):
@@ -231,13 +232,13 @@ def test_frozen_v1_index_still_valid_and_does_not_need_corpus_rewrite(indexed):
 
 
 @pytest.mark.parametrize("proposal", ["OBSERVE", "REVIEW", "NARROW"])
-def test_custom_router_cannot_skip_missing_guidance(indexed, proposal):
+def test_recovery_router_cannot_skip_missing_guidance(indexed, proposal):
     control = m2.controller(indexed)
     control.route = lambda context: RoutingDecision(proposal)
     result = control.retrieve_with_trace(
         m2.TASK,
         {"task_language": m2.LANGUAGE},
-        {"available_skills": ["pi0_pick"]},
+        {"available_skills": ["pi0_pick"], "purpose": "recover"},
         action_query=ActionQuery("pi0_pick", 0, ("localized:milk",), ()),
     )
     assert result.memory_read_complete

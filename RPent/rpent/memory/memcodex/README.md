@@ -300,9 +300,10 @@ corpus and a separate deterministic metadata index. Build and validate it once:
   --output memory/memcodex_m2_v2/INDEX.json
 ```
 
-Online retrieval opens at most eight candidates per visited layer, selected from
-task postings before reading bodies. It visits summary, relational, skills, raw
-in that order. Complete entries are packed under the token budget; omitted
+Online retrieval opens at most eight candidates per summary/relational/skills
+layer and two raw entries per query, selected from task postings before reading
+bodies. It visits summary, relational, skills, raw in that order. Complete
+entries are packed under the token budget; omitted
 entries cannot satisfy coverage rules. Index/manifest changes and changed
 selected bodies are rejected. Full source validation happens during preparation;
 online requests do not rescan every layer. Unselected bodies are checked when read.
@@ -311,8 +312,10 @@ The LIBERO `retrieve_memory` tool checks the live `task_language`, latest step,
 available primitives and failed-grasp status. `purpose="overview"` returns only
 the summary; its sufficiency verdict covers this limited purpose. Execution
 queries also require object localization and applicable skill guidance; recovery
-queries require recovery guidance. Missing perception does not stop skill or raw
-reads. The response separates `memory_missing` / `memory_read_complete` from
+queries require recovery guidance. Ordinary execute queries with missing localization
+return OBSERVE after relational guidance; recovery queries can continue to skills
+and raw without localization. The response separates `memory_missing` /
+`memory_read_complete` from
 `state_missing` / `state_evidence_complete`. The latter only covers requested
 evidence checks, not physical success or execution permission. `back_project` and
 `segment` attach evidence IDs to successful current-step results. The planner
@@ -426,7 +429,7 @@ The response header and private retrieval trace separate:
 - `action_preconditions_met`: every fixed action fact is independently verified.
 - `action_missing_facts` and `action_unverified_facts`: absent evidence versus
   existing planner claims requiring visual judgment.
-- `routing_decision`: `STOP`, `NARROW`, `DESCEND`, `OBSERVE`, or `REVIEW`, with a reason.
+- `routing_decision`: `STOP`, `NARROW`, `DESCEND`, `OBSERVE`, `REVIEW`, or `EXHAUSTED`, with a reason.
 
 Because this adapter has no independent identity/holding/placement verifier,
 normal candidate queries retain unverified facts and report
@@ -467,7 +470,9 @@ controller = MemCodexController(
 Pass a robot-adapter-validated `action_query` to `retrieve_with_trace`. The fixed
 runtime computes coverage from retained entries and validated facts, outside
 the routing function. An unsupported `STOP` cannot mark missing or claimed facts
-as verified. Nor can `OBSERVE` bypass missing memory before raw is exhausted.
+as verified. Normal execute queries defer at the relational layer when localization
+is missing; recovery queries cannot use that gate to skip necessary guidance.
+`EXHAUSTED` reports an indexed search gap and never certifies sufficiency.
 `NARROW` selects the runtime-proposed `narrow_ids` for the next layer; a custom
 policy cannot inject entry IDs or change applicability. The same budget and
 whole-entry packing rules apply. Use identical action workflows and budgets
@@ -482,7 +487,7 @@ Links connect entries citing the same source file to entries in deeper layers;
 line references remain available for audit. These are provenance links, not a
 semantic relation graph or proof of applicability. The reader verifies the
 links against entry provenance. Frozen schema-1 and schema-2 indexes remain readable and
-validatable: links are derived from metadata without rewriting the corpus, but
+validatable: links are derived from metadata without rewriting the corpus.
 Failure-topic tags are available in schema 2 and 3; the current rebuild emits
 schema 3, including the structured recovery cases. Use a new output path as above;
 the builder refuses to overwrite a different existing index.
@@ -498,9 +503,9 @@ counted as usable merely because its source is reachable.
 
 The private `routing_steps` trace records `NARROW`, `WIDEN`, descent and final
 decisions, including selected candidate IDs and missing memory/state evidence.
-The eight-file cap applies to both passes together; `LIMIT` records unread
-candidates when it binds. Budget-omitted bodies never count as coverage. Raw is
-a fallback, not an unconditional read, and missing current localization never
+The per-layer cap (eight, or two for raw) applies to both passes together;
+`LIMIT` records unread candidates when it binds. Budget-omitted bodies never
+count as coverage. Raw is a fallback, not an unconditional read, and missing current localization never
 becomes valid from historical coordinates. Once guidance is complete, state
 gaps request observation rather than more history. This does not implement an
 evolution loop, execute a skill, or update the frozen experience package.
@@ -519,17 +524,36 @@ Recovery sufficiency checks the particular failure (`object_slipped`,
 `grasp_not_closed`, `wrong_drawer`, `contact_stalled`, `insertion_blocked`, or
 `release_stuck`), with object category and phase when supplied. A source passage
 must describe both the symptom and a response; a generic recovery tag is not
-coverage. These conservative text rules can miss useful guidance. Unrecognized
-issues are reported as uncovered. Insufficient evidence widens and descends to
-raw within the existing file/token limits, then reports any remaining gap.
-Bodies and conditions remain unchanged; no extra LLM judge or online update is
-used. Current state, historical coverage, and native task success stay separate.
+coverage. These conservative text rules can miss useful guidance. An unrecognized
+issue is reported as `unclassified_issue`, never as a fictitious recovery case.
+When no eligible schema-3 metadata matches a known case, `unavailable_recovery`
+reports that indexed gap. Neither condition forces unrelated raw files to be read.
+After available generic skill/recovery guidance is delivered, `search_exhausted`
+and `EXHAUSTED` stop this search while preserving `memory_missing` and
+`sufficient=false`. Supply new failure details, applicability evidence, or a new
+corpus revision before retrying. No indexed match is not proof that useful
+unannotated experience does not exist.
+
+Known matches still require hash-checked bodies. Missing skills can still descend
+to raw; legacy indexes without case annotations retain bounded raw fallback.
+Unrelated case-only candidates are skipped using metadata. Whole entries and the
+32,768-token default remain unchanged, with at most two raw file reads per query.
+Repeated requests still return needed guidance; there is no assumption that a
+planner retains an earlier tool response, and no extra LLM judge or result cache.
+This reduces new injections; it does not remove earlier responses from history.
 
 `retrieve_memory` accepts `failure={kind, object_id, phase, step, artifact}`.
 It rejects stale/unrecorded images and unknown objects. This is an attributed
 planner observation, not a simulator assertion. Servo residual alerts compare
-against that command's tolerance and budget; contact `success=false` alone does
-not establish intermediate failure.
+against that command's tolerance and budget and request observation only; they
+do not set `needs_recovery` or diagnose contact. `pi0_doubled` results do not
+automatically append retrieval instructions. Explicit recovery requests, attributed
+failures, tool errors and failed pick flags retain their recovery path.
+
+Only profiles with `drawer_goal` publish drawer input fields and the drawer
+prompt protocol. Other tasks use a smaller schema with the same validation for
+manipulation and failure evidence. The full perception protocol appears once;
+the workflow references it.
 
 Drawer candidates use `pi0_doubled`, `move_pose`, or `move_to`,
 `roles={handle: "bottom_drawer_handle"}`, and

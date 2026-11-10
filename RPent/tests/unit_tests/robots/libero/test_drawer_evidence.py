@@ -151,7 +151,7 @@ def test_motion_residual_uses_command_tolerance_and_preserves_native_success():
         command={"action": "move_to", "max_steps": 50, "tol": 0.005},
         result={"final_dist_m": 0.02, "steps_used": 50},
     )
-    assert motion_alert(record) == "contact_stalled"
+    assert motion_alert(record) == "target_not_reached"
     record.terminated = True
     assert motion_alert(record) is None
     record.terminated = False

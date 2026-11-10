@@ -55,6 +55,24 @@ class RoutingContext:
     selected_ids: tuple[str, ...]
     recovery: bool
     narrow_ids: tuple[str, ...] = ()
+    unavailable: tuple[str, ...] = ()
+
+    @property
+    def searchable_missing(self) -> tuple[str, ...]:
+        """Exclude gaps that this indexed search cannot resolve, without certifying coverage."""
+        return tuple(m for m in self.memory_missing if m not in self.unavailable)
+
+    @property
+    def defer_for_localization(self) -> bool:
+        """Normal execution obtains geometry before deeper guidance; recovery can read first."""
+        return (
+            not self.recovery
+            and self.layer == "relational"
+            and any(
+                k == "object_localization" or k.startswith("localized:")
+                for k in self.action_missing_facts
+            )
+        )
 
     @property
     def memory_read_complete(self) -> bool:
@@ -71,15 +89,26 @@ class RoutingContext:
 class RoutingDecision:
     """Propose a read action without changing evidence or granting execution."""
 
-    action: Literal["STOP", "NARROW", "DESCEND", "OBSERVE", "REVIEW"]
+    action: Literal["STOP", "NARROW", "DESCEND", "OBSERVE", "REVIEW", "EXHAUSTED"]
 
     def __post_init__(self) -> None:
-        if self.action not in {"STOP", "NARROW", "DESCEND", "OBSERVE", "REVIEW"}:
+        if self.action not in {
+            "STOP",
+            "NARROW",
+            "DESCEND",
+            "OBSERVE",
+            "REVIEW",
+            "EXHAUSTED",
+        }:
             raise ValueError(f"Unknown memory routing action: {self.action!r}")
 
 
 def manual_route(context: RoutingContext) -> RoutingDecision:
     """Read candidate guidance, then distinguish observation from review gaps."""
+    if context.defer_for_localization:
+        return RoutingDecision("OBSERVE")
+    if context.memory_missing and not context.searchable_missing:
+        return RoutingDecision("EXHAUSTED")
     if context.memory_read_complete or context.layer == "raw":
         if context.action_missing_facts:
             return RoutingDecision("OBSERVE")

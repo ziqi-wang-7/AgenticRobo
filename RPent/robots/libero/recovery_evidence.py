@@ -119,5 +119,5 @@ def motion_alert(record) -> str | None:
         and distance > tolerance
         and result.get("steps_used", 0) >= command.get("max_steps", 80)
     ):
-        return "contact_stalled"
+        return "target_not_reached"
     return None

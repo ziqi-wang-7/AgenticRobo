@@ -36,7 +36,7 @@ _VISUAL_ARTIFACTS = frozenset(
 )
 
 
-class ActionCandidate(BaseModel):
+class ManipulationCandidate(BaseModel):
     """A planner proposal. The expected effect is descriptive, not evidence."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -45,7 +45,6 @@ class ActionCandidate(BaseModel):
     args: dict[str, Any]
     roles: dict[str, str]
     expected_effect: str | None = None
-    drawer: DrawerAction | None = None
 
 
 class DrawerAction(BaseModel):
@@ -58,17 +57,29 @@ class DrawerAction(BaseModel):
     direction: Literal["outward", "inward"]
 
 
-class ActionVisualCheck(BaseModel):
+class ActionCandidate(ManipulationCandidate):
+    """A manipulation proposal with optional drawer-specific constraints."""
+
+    drawer: DrawerAction | None = None
+
+
+class ManipulationVisualCheck(BaseModel):
     """A planner's positive interpretation of a current camera artifact."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    fact: Literal[
-        "holding", "placement_ready", "handle_level", "contact_ready", "access_clear"
-    ]
+    fact: Literal["holding", "placement_ready"]
     object_id: str
     step: int
     artifact: str
+
+
+class ActionVisualCheck(ManipulationVisualCheck):
+    """A manipulation or drawer check attributed to a current image."""
+
+    fact: Literal[
+        "holding", "placement_ready", "handle_level", "contact_ready", "access_clear"
+    ]
     value: str | bool | None = None
 
 

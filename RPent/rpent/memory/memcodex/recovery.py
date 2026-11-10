@@ -114,7 +114,7 @@ def requirements(state: dict) -> tuple[str, ...]:
             raise ValueError(f"Unknown recovery failure kind: {explicit}")
         return (explicit,)
     issue = str(state.get("issue", "")).strip()
-    return tuple(failure_kinds(issue) or (["unclassified"] if issue else []))
+    return tuple(failure_kinds(issue))
 
 
 def covers(case: dict, kind: str, state: dict) -> bool:

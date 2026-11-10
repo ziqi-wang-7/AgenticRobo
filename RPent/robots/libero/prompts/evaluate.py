@@ -600,107 +600,80 @@ def workflow_steps(
     )
 
 
-M2_MEMORY = """Use `retrieve_memory` for task experience; the library is read-only.
-After inspecting the initial task_language, call retrieve_memory(step=<latest>,
-purpose="overview") for the exact task summary and required_objects IDs.
-Before planning manipulation, perform the perception pass. Successful
-back_project/segment results supply memory_evidence_id. Bind each required object
-ID to its own current-step evidence ID in retrieve_memory(..., purpose="execute",
-localizations={...}). Verify semantic identity from images: a depth point alone
-does not identify an object. After motion old evidence IDs expire. Omit missing
-localizations when requesting recovery guidance; obtain fresh evidence before
-using coordinates for an action. You may keep using already-delivered guidance
-without calling retrieve_memory after every action.
+MEMORY_READING = """Use the read-only retrieve_memory tool for task experience. After inspecting
+task_language, request overview once to obtain task/object IDs. Reuse delivered
+guidance while it applies; no retrieval is required before every primitive.
 
-Retrieval progresses summary -> relational -> skills -> raw only as needed.
-Memory gaps cause further reading even when localization is absent. Check
-memory_read_complete and memory_missing separately from state_missing:
-object_localization requires fresh observations before using action geometry,
-not repeated retrieval of already-delivered guidance. NARROW focuses linked
-sources and action/failure topics; insufficient guidance widens the search
-within the task and may descend to raw. If review_entries is nonempty, inspect
-those entries' applicability conditions against the current scene. Confirm only applicable IDs with
-applicable_entries in your next call at the same step. Analogies are explicitly
-marked different tasks; obey the CURRENT task_language, never replace its goal
-with a reference goal. On a failed grasp or observed anomaly, use purpose="recover"
-and describe the observed issue, supplying fresh localizations as needed.
-When possible include failure={kind, object_id, phase, step, artifact} using a
-current saved camera image. Distinguish grasp_not_closed, object_slipped,
-insertion_blocked, release_stuck, wrong_drawer and contact_stalled. A recovery
-label alone is not coverage: memory_missing may name recovery_case:<kind>.
-An unresolved case continues toward raw; if still uncovered, report the gap
-instead of treating a historical generic retry as a verified solution.
+For execute, obtain the required current geometry first. A missing localization
+returns OBSERVE after relational guidance. For an observed problem, recover may
+read skills without localization; refresh geometry before acting. Historical
+coordinates and reset commands are never current action targets.
 
-sufficient only describes rule-based information coverage; it does not certify
-a correct grasp or task success. Inspect images and native terminated as usual.
-Historical raw experience may contain coordinates and reset commands: do not
-replay them. Re-localize coordinates and obey this episode's single-attempt rules.
-If relevant guidance is unavailable or the budget omits it, say so and proceed
-using current observations and the robot guides. Record used entry IDs in the audit.
+Read memory_missing separately from state_missing. Specific failures require
+matching guidance, not a generic recovery tag. Unclassified issues or cases
+with no indexed match remain explicit gaps: search_exhausted/EXHAUSTED ends this
+search without claiming sufficient=true. Do not repeat an unchanged query;
+provide new failure details or applicability evidence, or use current images and
+robot guides. Actual skill gaps can still descend to raw; raw reads are bounded
+and omitted bodies are never counted as coverage.
+
+Review returned entry conditions against current images. Confirm applicable IDs
+or reject inapplicable IDs using applicable_entries/rejected_entries at the same
+step and candidate; changed candidate parameters require fresh review. Analogies
+never replace the current task goal. Geometry IDs verify provenance, not semantic
+identity. Missing/claimed facts require observation/judgment, not repeated memory
+reads. Sufficiency is information coverage, never task success or execution
+permission. Native terminated remains the success signal. Record used IDs in
+the final audit.
 """
 
-ACTION_MEMORY = """Use retrieve_memory(step=<latest>, purpose="overview") to learn
-the exact task and its required_objects IDs. When you already have a candidate
-pi0_pick, closed-gripper transport move_to, or release, include candidate in an
-existing execute/recover retrieval: {tool, args, roles, expected_effect?}.
-For pi0_pick, roles is {target_object: <task object ID>}. For transport move_to
-and release, roles is {held_object: <ID>, destination: <distinct ID>}; transport
-move_to must explicitly use gripper=1.0. Primitives outside these and the drawer contract below use ordinary retrieval
-without candidate only if guidance is needed. Reuse the pick guidance for its
-empty-gripper approach; do not add a separate full-task retrieval just for that
-approach. expected_effect is descriptive and cannot establish a fact.
+M2_MEMORY = (
+    MEMORY_READING
+    + """
+Bind each required object to a distinct current-step back_project/segment
+memory_evidence_id via localizations. Inspect images to verify identity. Old
+localizations expire after motion. On an observed problem, use purpose=recover
+and issue; optionally include a failure attributed to a current camera image.
+"""
+)
 
-Drawer candidates support pi0_doubled, move_pose and move_to with roles={handle:
-<level>_drawer_handle} and drawer={target_level: "top"|"middle"|"bottom",
-operation: "open"|"close", stage: "approach"|"engage"|"actuate"|"disengage",
-direction: "outward"|"inward"}. Opening is outward; closing is inward relative
-to the cabinet, not a fixed world-axis sign. Use the context_objects IDs from
-overview. drawer_handle is an alias only for the task's goal level. Recovery
-on a different drawer must use that level's explicit handle ID and fresh geometry.
-Bind current handle localization; check handle_level (value=<level>) and
-access_clear (value=true) in visual_checks. Before an actuating push/pull also
-check contact_ready (value=true). These checks remain image-attributed claims.
-For pi0_doubled prompt the selected drawer explicitly. If two contact attempts
-produce no opening/closing progress, inspect engagement/clearance and retrieve a
-different applicable approach or wrist-pose recovery before repeating them.
-After each drawer primitive compare before/after images. You can include
-drawer_progress={previous_step, step, artifact, target_level, observed_level,
-expected_direction, observed_direction} in retrieval. Levels are top/middle/bottom
-(observed_level may be unknown); directions are outward/inward (observed_direction
-may be none/unknown). Wrong-level motion or no progress triggers recovery reading;
-do not equate pi0_doubled.success=false with an intermediate contact failure.
-Before transport, verify that the held object follows a short lift; continue
-checking relative motion during carry. A finger gap alone does not prove holding.
-After slipping, report object_slipped and choose a new applicable grasp/contact
-strategy from current geometry rather than repeating an open-finger remedy.
+ACTION_MEMORY = (
+    MEMORY_READING
+    + """
+Include an existing proposed action when execution/recovery guidance is needed:
+candidate={tool, args, roles, expected_effect?}. Supported manipulation roles:
+pi0_pick uses target_object; transport move_to and release use held_object and a
+distinct destination. Transport requires gripper=1.0. Bind current geometry for
+the pick target or transport/release destination using localizations. Reuse pick
+guidance for its empty-gripper approach; other primitives use ordinary retrieval
+only when guidance is needed. expected_effect is descriptive, not evidence.
 
-Bind the candidate's target or destination to its current back_project/segment
-memory_evidence_id via localizations. Only geometry provenance is verified;
-semantic identity remains your image interpretation. For transport or release,
-visual_checks can record positive image interpretations as
-{fact: "holding" | "placement_ready", object_id, step, artifact}. Use holding
-with held_object and placement_ready with the release destination. Cite only a
-camera PNG actually saved at the current step. These are attributed claims,
-not independently verified physical facts. Do not invent confirmations.
+For transport/release, visual_checks may attribute holding (held_object) or
+placement_ready (destination) to a saved current camera image. These remain
+claims, as does object identity. Verify that an object follows a short lift and
+stays held during carry; finger gap alone is insufficient. Report an observed
+problem in issue or failure={kind, object_id, phase, step, artifact}. A servo
+residual is a request to inspect progress, not proof of contact failure.
+"""
+)
 
-memory_read_complete covers retained guidance, independently of current facts.
-NARROW focuses source-linked action/failure guidance; incomplete focused reads
-widen within the task before descending further. Missing geometry does not
-prevent reading recovery instructions. OBSERVE requests missing current
-evidence; REVIEW asks you to judge claims or memory conditions from images.
-Read action_missing_facts and action_unverified_facts separately. Claimed
-identity/holding/placement keep action_preconditions_met false by design.
-Repeated retrieval cannot certify a visual claim: inspect evidence and retain
-responsibility for the next primitive under the ordinary robot rules. STOP
-ends memory reading only. No retrieval result authorizes execution or predicts
-task success, and historical coordinates must never become current targets.
+DRAWER_MEMORY = """Drawer candidates also support pi0_doubled, move_pose and move_to with
+roles={handle: <level>_drawer_handle} and drawer={target_level, operation, stage,
+direction}. Levels are top/middle/bottom; stages approach/engage/actuate/disengage.
+Opening is outward, closing inward relative to the cabinet, never a fixed world
+axis. Use context_objects IDs; drawer_handle aliases only the task goal level.
+Correcting a different drawer requires that level's explicit handle and fresh
+geometry. visual_checks attribute handle_level (value=<level>), access_clear
+(value=true), and, before actuation, contact_ready (value=true) to current images.
 
-Confirm applicable review_entries with applicable_entries, or reject them with
-rejected_entries so retrieval can continue. Both lists must refer to entries
-returned for this same step and candidate (including its parameters); changing
-the candidate requires a fresh retrieval. On an observed problem use recover
-and describe issue. Keep already-delivered guidance; do not add a retrieval
-before every primitive. Record selected entry IDs in the final audit."""
+Compare intended and observed drawer progress. If a wrong level/direction or
+repeated lack of progress is observed and new guidance is needed, recover can
+include drawer_progress={previous_step, step, artifact, target_level,
+observed_level, expected_direction, observed_direction}. Observed level may be
+unknown; observed direction may be none/unknown. Use consecutive saved images.
+An intermediate pi0_doubled.success=false alone is not a contact failure.
+"""
+
 
 ACTION_PERCEPTION = """Identify the task's targets, destinations and relation
 landmarks in the initial agentview image. For a supported candidate, obtain
@@ -737,6 +710,8 @@ def system_prompt(
         (variables or {}).get("memcodex_action_evidence", False)
     )
     m2_memory = ACTION_MEMORY if action_evidence else M2_MEMORY
+    if memory_mode == "m2" and (variables or {}).get("memcodex_drawer", False):
+        m2_memory += "\n" + DRAWER_MEMORY
     if memory_mode in {"m1", "m2"}:
         memory_instruction = (
             "Use the supplied task memory and its conditions before planning. No library search is required."
@@ -762,7 +737,9 @@ def system_prompt(
                         memory_instruction
                         if memory_mode == "m1"
                         else "Follow TASK MEMORY: retrieve overview, localize, then retrieve execution guidance; recover only as needed.",
-                        ACTION_PERCEPTION if action_evidence else STEP_PERCEPTION_PASS,
+                        "Follow FIRST-STEP ALGORITHM for perception and current geometry."
+                        if memory_mode == "m2"
+                        else STEP_PERCEPTION_PASS,
                         STEP_EXECUTE,
                         STEP_PRIMITIVES,
                         STEP_RECOVERY,

@@ -38,9 +38,10 @@ _ROUTING_ENVELOPES = (
     ("OBSERVE", "missing_action_facts"),
     ("REVIEW", "unverified_action_facts"),
     ("REVIEW", "memory_entry_review"),
+    ("EXHAUSTED", "no_searchable_recovery_match"),
     *(
         (action, "fixed_evidence_contract")
-        for action in ("STOP", "NARROW", "DESCEND", "OBSERVE", "REVIEW")
+        for action in ("STOP", "NARROW", "DESCEND", "OBSERVE", "REVIEW", "EXHAUSTED")
     ),
 )
 
@@ -75,6 +76,9 @@ def retrieve_indexed(
         state.get("needs_recovery") or state.get("anomaly") or purpose == "recover"
     )
     required_recovery = requirements(state) if recovery else ()
+    unclassified = (
+        recovery and bool(str(state.get("issue", "")).strip()) and not required_recovery
+    )
     localized = set(observation.get("localized_objects", ()))
     required = set(profile["required_skills"])
     required_objects = profile["required_objects"]
@@ -118,6 +122,10 @@ def retrieve_indexed(
     kept: list[tuple[dict, str]] = []
     visited, omitted, seen_paths = [], [], set()
     reads = candidate_tokens = 0
+    unavailable: set[str] = {"unclassified_issue"} if unclassified else set()
+
+    def searchable_missing(items: list[tuple[dict, str]]) -> tuple[str, ...]:
+        return tuple(m for m in assess(items) if m not in unavailable)
 
     def relevant_guidance(metadata: dict) -> bool:
         return (
@@ -167,6 +175,8 @@ def retrieve_indexed(
                     for case in m.get("recovery_cases", ())
                 ):
                     missing.append(f"recovery_case:{kind}")
+            if unclassified:
+                missing.append("unclassified_issue")
         if not usable:
             missing.append("applicable_memory")
         return tuple(missing)
@@ -185,6 +195,11 @@ def retrieve_indexed(
             "context_objects": profile.get("context_objects", []),
             "drawer_goal": profile.get("drawer_goal"),
             "recovery_requirements": list(required_recovery),
+            "unavailable_recovery": sorted(unavailable),
+            "search_exhausted": bool(memory_missing) and not searchable_missing(items),
+            "retry_condition": "New failure details, applicability evidence or corpus revision; unchanged queries cannot fill unavailable gaps."
+            if unavailable
+            else None,
             "failure_context": {
                 key: state[key]
                 for key in ("failure_kind", "failure_object", "phase")
@@ -250,9 +265,6 @@ def retrieve_indexed(
             fits_text(render(info, blocks, routing)) for routing in _ROUTING_ENVELOPES
         )
 
-    if not fits([]):
-        raise ValueError("Memory budget cannot fit the query/status envelope")
-
     def eligible_candidates(layer: str) -> list[dict]:
         return [
             m
@@ -269,6 +281,31 @@ def retrieve_indexed(
             )
         ]
 
+    # A missing schema-3 case is a retrieval gap, not a reason to dump source
+    # files. Legacy indexes lack these annotations: bounded fallback remains
+    # possible. Positive metadata never substitutes for a hash-checked body.
+    recovery_candidates = (
+        [m for layer in LAYERS for m in eligible_candidates(layer)]
+        if required_recovery
+        else []
+    )
+    for kind in required_recovery:
+        if (
+            recovery_candidates
+            and all("recovery_cases" in m for m in recovery_candidates)
+            and not any(
+                covers(case, kind, state)
+                for m in recovery_candidates
+                for case in m["recovery_cases"]
+            )
+        ):
+            unavailable.add(f"recovery_case:{kind}")
+        elif not recovery_candidates:
+            unavailable.add(f"recovery_case:{kind}")
+
+    if not fits([]):
+        raise ValueError("Memory budget cannot fit the query/status envelope")
+
     routing = None
     routing_steps = []
     pending_scope: set[str] | None = None
@@ -282,6 +319,33 @@ def retrieve_indexed(
     for layer_index, layer in enumerate(LAYERS):
         visited.append(layer)
         eligible = eligible_candidates(layer)
+        if layer in {"skills", "raw"} and required_recovery:
+            eligible.sort(
+                key=lambda m: (
+                    -sum(
+                        covers(case, kind, state)
+                        for kind in required_recovery
+                        for case in m.get("recovery_cases", ())
+                    )
+                )
+            )
+        # Raw is a bounded fallback. Restrict case-only searches to possible
+        # matches instead of serializing unrelated complete source files.
+        if (
+            layer == "raw"
+            and searchable_missing(kept)
+            and all(m.startswith("recovery_case:") for m in searchable_missing(kept))
+        ):
+            eligible = [
+                m
+                for m in eligible
+                if "recovery_cases" not in m
+                or any(
+                    covers(case, kind, state)
+                    for kind in required_recovery
+                    for case in m["recovery_cases"]
+                )
+            ]
         first = (
             [m for m in eligible if m["key"] in pending_scope]
             if pending_scope is not None
@@ -289,9 +353,14 @@ def retrieve_indexed(
         )
         fallback = [m for m in eligible if m not in first]
         layer_reads = 0
+        read_cap = (
+            min(controller.retriever.max_per_layer, 2)
+            if layer == "raw"
+            else controller.retriever.max_per_layer
+        )
         for pass_index, candidates in enumerate((first, fallback)):
             if pass_index:
-                if not assess(kept) or not candidates:
+                if not searchable_missing(kept) or not candidates:
                     break
                 routing_steps.append(
                     {
@@ -302,8 +371,21 @@ def retrieve_indexed(
                     }
                 )
             for metadata in candidates:
-                if layer_reads >= controller.retriever.max_per_layer:
+                if layer_reads >= read_cap:
                     break
+                remaining = searchable_missing(kept)
+                if (
+                    layer in {"skills", "raw"}
+                    and remaining
+                    and all(m.startswith("recovery_case:") for m in remaining)
+                    and "recovery_cases" in metadata
+                    and not any(
+                        covers(case, m.removeprefix("recovery_case:"), state)
+                        for m in remaining
+                        for case in metadata["recovery_cases"]
+                    )
+                ):
+                    continue
                 if metadata["path"] in seen_paths:
                     continue
                 seen_paths.add(metadata["path"])
@@ -327,10 +409,10 @@ def retrieve_indexed(
                     kept = proposal
                 else:
                     omitted.append(entry.key)
-                if not assess(kept):
+                if not searchable_missing(kept):
                     break
         missing = assess(kept)
-        if missing and layer_reads >= controller.retriever.max_per_layer:
+        if searchable_missing(kept) and layer_reads >= read_cap:
             unread = [m["key"] for m in eligible if m["path"] not in seen_paths]
             if unread:
                 routing_steps.append(
@@ -344,7 +426,7 @@ def retrieve_indexed(
         narrow_ids: tuple[str, ...] = ()
         narrow_reason = ""
         next_layer = None
-        if missing and layer_index + 1 < len(LAYERS):
+        if searchable_missing(kept) and layer_index + 1 < len(LAYERS):
             next_layer = LAYERS[layer_index + 1]
             next_candidates = eligible_candidates(next_layer)
             focused, narrow_reason = corpus.narrow(
@@ -372,6 +454,7 @@ def retrieve_indexed(
             selected_ids=tuple(m["key"] for m, _ in kept),
             recovery=recovery,
             narrow_ids=narrow_ids,
+            unavailable=tuple(sorted(unavailable)),
         )
         if action_query is not None:
             routing = _candidate_route(controller, context)
@@ -445,6 +528,8 @@ def _candidate_route(
     if not isinstance(proposal, RoutingDecision):
         raise TypeError("The memory routing policy must return a RoutingDecision")
     action = proposal.action
+    if context.defer_for_localization and action != "OBSERVE":
+        return "OBSERVE", "fixed_evidence_contract"
     if (
         (
             action == "STOP"
@@ -454,8 +539,16 @@ def _candidate_route(
             action == "OBSERVE"
             and (
                 not context.action_missing_facts
-                or (not context.memory_read_complete and context.layer != "raw")
+                or (
+                    not context.memory_read_complete
+                    and context.layer != "raw"
+                    and not context.defer_for_localization
+                )
             )
+        )
+        or (
+            action == "EXHAUSTED"
+            and (not context.memory_missing or bool(context.searchable_missing))
         )
         or (
             action == "NARROW"
@@ -492,6 +585,8 @@ def _candidate_route(
         )
     if action == "STOP":
         return action, "evidence_covered"
+    if action == "EXHAUSTED":
+        return action, "no_searchable_recovery_match"
     return (
         action,
         "layers_exhausted" if context.layer == "raw" else "continue_memory_read",

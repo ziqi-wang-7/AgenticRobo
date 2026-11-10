@@ -80,7 +80,9 @@ def test_custom_stop_cannot_certify_missing_or_claimed_facts(indexed):
         ),
     )
 
-    assert any(context.memory_read_complete for context in attempted)
+    assert not any(context.memory_read_complete for context in attempted)
+    assert result.layers_visited[-1] == "relational"
+    assert result.routing_decision == "OBSERVE"
     assert not result.sufficient and not result.action_preconditions_met
     assert result.action_missing_facts == ("localized:basket",)
     assert result.action_unverified_facts == ("holding:milk",)
@@ -126,7 +128,7 @@ def test_action_routing_header_counts_against_wire_budget(indexed):
     baseline = m2.controller(indexed).retrieve_with_trace(
         m2.TASK, observation, state, action_query=action
     )
-    assert baseline.memory_read_complete and baseline.routing_decision == "OBSERVE"
+    assert not baseline.memory_read_complete and baseline.routing_decision == "OBSERVE"
 
     budget = baseline.token_count - 1
     limited = m2.controller(indexed, budget).retrieve_with_trace(

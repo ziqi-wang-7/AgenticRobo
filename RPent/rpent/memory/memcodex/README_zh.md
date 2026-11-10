@@ -215,14 +215,16 @@ M0 部分原生命令输出混合了记忆与其他内容，无法完整归因 M
   --output memory/memcodex_m2_v2/INDEX.json
 ```
 
-在线先查任务索引，再打开候选正文，每层最多读取 8 条，顺序为摘要→关系→技能→原始
-经验。只按完整条目装入预算，被省略的条目不能参与充分性判断。索引、清单变化和选中
+在线先查任务索引，再打开候选正文；摘要、关系、技能层各最多读取 8 条，raw 每次请求
+最多读取 2 条，顺序为摘要→关系→技能→原始经验。只按完整条目装入预算，被省略的条目
+不能参与充分性判断。索引、清单变化和选中
 文件的哈希变化都会报错。准备阶段完整校验来源；在线不扫描整层，未选中的正文在实际
 读取时校验。
 
 LIBERO 的 `retrieve_memory` 工具读取本回合真实的任务指令、最新步骤、可用原语和抓取
 失败信息。`purpose="overview"` 只请求摘要，其充分性也仅针对摘要；执行请求还检查
-物体定位和技能指导，恢复请求还检查恢复指导。缺少观测不阻断 skills 或 raw 读取。
+物体定位和技能指导，恢复请求还检查恢复指导。普通 execute 缺定位时在关系层返回
+OBSERVE；recover 即使缺定位，仍可读取必要的 skills 或 raw 指导。
 返回值分别报告 `memory_missing`／`memory_read_complete` 和
 `state_missing`／`state_evidence_complete`；后者仅表示本次请求的证据检查，
 不证明物理状态或授予执行权限。
@@ -319,7 +321,7 @@ M1 和非索引模式不接受此开关。
 - `memory_read_complete`：保留的条目覆盖当前候选技能和必要的恢复指导。
 - `action_preconditions_met`：固定动作契约要求的事实全部通过独立验证。
 - `action_missing_facts` 和 `action_unverified_facts`：缺少证据，以及已有但仍需判断的声明。
-- `routing_decision`：`STOP`、`NARROW`、`DESCEND`、`OBSERVE` 或 `REVIEW`，附带原因。
+- `routing_decision`：`STOP`、`NARROW`、`DESCEND`、`OBSERVE`、`REVIEW` 或 `EXHAUSTED`，附带原因。
 
 当前适配器没有独立的身份、持物或放置验证器，因此正常的候选查询仍存在未验证事实，
 即使提供视觉检查也会返回 `action_preconditions_met=false`。`sufficient` 要求两个
@@ -353,7 +355,8 @@ controller = MemCodexController(
 
 向 `retrieve_with_trace` 传入机器人适配器校验后的 `action_query`。固定运行时在路由
 函数之外，依据真正保留的条目与有效证据计算覆盖情况；无依据的 `STOP` 不能将缺失或
-声明状态改成已验证；在 raw 耗尽前，`OBSERVE` 也不能跳过缺失的记忆。
+声明状态改成已验证。普通 execute 缺定位时在关系层先补观测；恢复检索不能利用该门槛
+跳过必要指导。`EXHAUSTED` 表示索引搜索的缺口，不将充分性标记为真。
 `NARROW` 使用运行时提出的 `narrow_ids` 限定下一层范围；替换策略不能注入条目 ID
 或更改适用性。原有预算和完整条目打包约束继续生效。
 比较人工规则和替换策略时，应固定动作流程与预算，另外测量整回合 Token、耗时和环境
@@ -374,7 +377,8 @@ controller = MemCodexController(
 `REVIEW`，不能仅因能追溯到来源就计作有效指导。
 
 私有 `routing_steps` 日志记录 `NARROW`、`WIDEN`、下降与最终决策，附带候选 ID 和
-记忆／状态缺口。两轮读取共用每层八文件上限，触及上限时用 `LIMIT` 记录未读候选。
+记忆／状态缺口。两轮共用每层上限：前三层各 8 条、raw 2 条；触及上限时用 `LIMIT`
+记录未读候选。
 预算省略的正文不能计入覆盖度。raw 是兜底，不是每次必读；历史坐标不能补齐当前定位。
 指导足够后，状态缺口应补观测，不继续读历史。本实现不包含程序演化、技能自动执行
 或冻结经验包的在线更新。
@@ -393,14 +397,26 @@ controller = MemCodexController(
 `wrong_drawer`（错误层级）、`contact_stalled`（接触无进展）、`insertion_blocked`
 （插入受阻）和 `release_stuck`（释放后仍勾连），并在提供时核对物体类别、操作阶段。
 原文片段必须同时包含故障症状和应对措施；泛化的 recovery 标签不算具体覆盖。
-这些保守文本规则可能漏掉有效经验；未知故障会明确报告为未覆盖。覆盖不足时在现有
-文件数和 Token 预算内扩大范围并下降到 raw，耗尽后仍保留缺口，不将充分性等同于成功。
-记忆正文和适用条件保持不变，不新增 LLM 判断调用或在线更新。
+这些保守文本规则可能漏掉有效经验。未识别的问题报告为 `unclassified_issue`，不再制造
+语料永远无法覆盖的故障标签。已知类型在符合任务、适用条件及拒绝列表的 schema-3 索引
+中无匹配时，用 `unavailable_recovery` 报告。两种缺口都不会强制读取无关 raw。
+交付可用的通用技能和恢复指导后，用 `search_exhausted`／`EXHAUSTED` 停止本次搜索，
+同时保留 `memory_missing` 和 `sufficient=false`。新增故障描述、适用性证据或语料版本后
+才有理由重试。索引无匹配不证明所有未标注经验都无用。
+
+已知候选仍须读取并校验正文；缺技能时仍可下降到 raw，缺案例标注的旧索引保留有界兜底。
+只剩具体故障缺口时，用元数据跳过不匹配的正文。仍按完整条目和原默认 32,768 Token
+预算交付，每次最多读两个 raw 文件。重复请求仍交付必要指导，不假设 Planner 已记住旧
+响应，不新增 LLM 判断或结果缓存。此改动减少新注入内容，不会删除已有对话历史。
 
 `retrieve_memory` 接受 `failure={kind, object_id, phase, step, artifact}`，
 拒绝过期图像、未保存图像和未知物体。它记录 Planner 的当前视觉判断，不作为仿真真值。
-伺服告警只检查该命令自身的容差与步数预算；接触技能的 `success=false` 不自动代表
-中间操作失败。
+伺服告警只检查该命令的容差与步数预算，提示观察，不设置 `needs_recovery`，也不诊断
+接触故障。`pi0_doubled` 不再自动追加检索指令。显式恢复请求、带证据的失败报告、工具
+错误和抓取失败标记仍保留恢复路径。
+
+只有任务索引含 `drawer_goal` 时才发布抽屉字段和对应 prompt；其他任务使用较小的 schema，
+仍校验操作候选和失败证据。完整感知协议只出现一次，工作流引用该协议。
 
 抽屉候选支持 `pi0_doubled`、`move_pose`、`move_to`，例如
 `roles={handle: "bottom_drawer_handle"}`，配合

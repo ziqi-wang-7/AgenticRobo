@@ -38,7 +38,7 @@ def test_slip_is_covered_without_unnecessary_raw(indexed):
     assert result.layers_visited[-1] == "skills"
 
 
-def test_wrong_drawer_descends_despite_generic_recovery_and_reports_exhaustion(indexed):
+def test_absent_drawer_case_reports_exhaustion_without_reading_raw(indexed):
     result = m2.query(
         m2.controller(indexed),
         purpose="recover",
@@ -47,7 +47,8 @@ def test_wrong_drawer_descends_despite_generic_recovery_and_reports_exhaustion(i
         phase="articulate",
         localized=False,
     )
-    assert result.layers_visited[-1] == "raw"
+    assert result.layers_visited[-1] == "skills"
+    assert result.routing_steps[-1]["action"] == "EXHAUSTED"
     assert not result.memory_read_complete
     assert "recovery_case:wrong_drawer" in result.memory_missing
     assert "object_localization" in result.state_missing

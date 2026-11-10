@@ -29,6 +29,8 @@ from typing import Any, Literal
 from robots.libero.action_evidence import (
     ActionCandidate,
     ActionVisualCheck,
+    ManipulationCandidate,
+    ManipulationVisualCheck,
     build_action_query,
 )
 from robots.libero.memcodex import SOURCE_REVISION
@@ -115,6 +117,9 @@ def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
         memory_mode="m2",
         memory_dir=str(view),
         memcodex_action_evidence=record["action_evidence"],
+        memcodex_drawer=bool(
+            controller.indexed.profile(record["task"]).get("drawer_goal")
+        ),
     )
 
 
@@ -152,7 +157,16 @@ class M2LiberoToolkit(LiberoToolkit):
                 original.with_handler(partial(self._capture_localization, original)),
                 replace=True,
             )
-        self.add_tool(self.retrieve_memory)
+        self.add_tool(self._retrieval_tool())
+
+    def _retrieval_tool(self):
+        """Publish drawer fields only for indexed drawer tasks."""
+        profile = self.memory.controller.indexed.profile(self.memory.record["task"])
+        return (
+            self.retrieve_memory
+            if profile.get("drawer_goal")
+            else self._retrieve_general
+        )
 
     def _capture_localization(self, original: Any, **kwargs: Any) -> ToolResult:
         result = original(**kwargs)
@@ -187,13 +201,57 @@ class M2LiberoToolkit(LiberoToolkit):
         record = self._state.latest_record()
         if record and not record.terminated:
             alert = motion_alert(record)
-            if alert or name == "pi0_doubled":
-                response.data["progress_check"] = {
+            if alert:
+                response.data["motion_check"] = {
                     "step": record.step_idx,
-                    "servo_residual_exceeded": bool(alert),
-                    "instruction": "Inspect target identity and before/after progress. For drawers check the specific level and opening/closing direction. After wrong-level motion, blocked contact or no progress, call retrieve_memory with purpose=recover, current failure/drawer_progress and fresh geometry before repeating the maneuver. Servo residual alone does not identify a collision.",
+                    "target_reached": False,
+                    "failure_confirmed": False,
+                    "instruction": "Compare intended progress with current images; servo residual alone does not identify a failure.",
                 }
         return response
+
+    @tool(name="retrieve_memory", readonly=True)
+    def _retrieve_general(
+        self,
+        step: int,
+        purpose: Literal["overview", "execute", "recover"] = "execute",
+        localizations: dict[str, str] | None = None,
+        applicable_entries: list[str] | None = None,
+        issue: str = "",
+        candidate: ManipulationCandidate | None = None,
+        visual_checks: list[ManipulationVisualCheck] | None = None,
+        rejected_entries: list[str] | None = None,
+        failure: FailureObservation | None = None,
+    ) -> ToolResult:
+        """Read indexed guidance; inspect state gaps and unavailable recovery matches.
+
+        Args:
+            step: Latest observation step.
+            purpose: Summary, execution guidance, or recovery after an observed problem.
+            localizations: Object IDs mapped to current memory_evidence_id values.
+            applicable_entries: Applicable returned IDs for this step/candidate.
+            issue: Observed problem; not a verified environment fact.
+            candidate: Proposed primitive, parameters and object roles.
+            visual_checks: Current image-attributed holding/placement checks.
+            rejected_entries: Inapplicable returned IDs for this step/candidate.
+            failure: Optional specific failure attributed to a current image.
+        """
+        return self.retrieve_memory(
+            step=step,
+            purpose=purpose,
+            localizations=localizations,
+            applicable_entries=applicable_entries,
+            issue=issue,
+            candidate=candidate.model_dump()
+            if isinstance(candidate, ManipulationCandidate)
+            else candidate,
+            visual_checks=[
+                v.model_dump() if isinstance(v, ManipulationVisualCheck) else v
+                for v in visual_checks or ()
+            ],
+            rejected_entries=rejected_entries,
+            failure=failure,
+        )
 
     @tool(readonly=True)
     def retrieve_memory(
@@ -212,16 +270,16 @@ class M2LiberoToolkit(LiberoToolkit):
         """Read task experience from summary through raw evidence only as needed.
 
         Args:
-            step: Latest state step; stale observations are rejected.
-            purpose: overview for summary; execute for skill guidance; recover after a problem.
-            localizations: Required object IDs mapped to current back_project/segment memory_evidence_id values. You must verify each semantic identity in the images.
-            applicable_entries: Previously returned entry IDs verified for this step and candidate.
-            issue: Current anomaly observed in images; guides topic narrowing, never establishes an environment fact.
-            candidate: Optional proposed primitive and task-object roles. Retrieves evidence without executing it.
-            visual_checks: Planner-attributed holding or placement checks tied to a recorded current image.
-            rejected_entries: Previously returned entry IDs found inapplicable for this step and candidate.
-            failure: Specific current image-attributed failure, with object, phase and artifact.
-            drawer_progress: Before/after drawer level and direction from consecutive recorded images.
+            step: Latest observation step.
+            purpose: Summary, execution guidance, or recovery after an observed problem.
+            localizations: Object IDs mapped to current memory_evidence_id values.
+            applicable_entries: Applicable returned IDs for this step/candidate.
+            issue: Observed problem; not a verified environment fact.
+            candidate: Proposed primitive, parameters and object roles.
+            visual_checks: Current image-attributed manipulation/drawer checks.
+            rejected_entries: Inapplicable returned IDs for this step/candidate.
+            failure: Optional specific failure attributed to a current image.
+            drawer_progress: Drawer progress attributed to consecutive images.
         """
         with self._memory_lock:
             record = self._state.latest_record()
@@ -281,7 +339,6 @@ class M2LiberoToolkit(LiberoToolkit):
             failed = bool(
                 result.get("error")
                 or (action == "pi0_pick" and result.get("success") is False)
-                or motion_alert(record)
             )
             failure_state = {}
             if failure is not None:
@@ -310,8 +367,6 @@ class M2LiberoToolkit(LiberoToolkit):
                         "failure_object": f"{drawer_progress.target_level}_drawer_handle",
                         "phase": "articulate",
                     }
-            if not failure_state and not issue.strip() and motion_alert(record):
-                failure_state = {"failure_kind": "contact_stalled"}
             observation = {
                 "task_language": record.extras.get("task_language"),
                 "localized_objects": sorted(evidence),
