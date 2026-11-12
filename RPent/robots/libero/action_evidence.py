@@ -228,6 +228,24 @@ def build_action_query(
                 "failed": "rejected",
             }[check.status]
             source = "planner_wrist_grasp_assessment"
+        elif check.fact == "placement_ready":
+            if not check.artifact.startswith("agentview"):
+                raise ValueError("Placement readiness requires the agentview camera")
+            if check.status not in {None, "verified", "uncertain", "failed"}:
+                raise ValueError(
+                    "Placement evidence requires verified, uncertain or failed status"
+                )
+            if check.status == "verified" and check.value is not True:
+                raise ValueError("Verified placement readiness requires value=true")
+            if check.status == "failed" and check.value is True:
+                raise ValueError("Failed placement readiness cannot have value=true")
+            status = {
+                None: "claimed",
+                "verified": "verified",
+                "uncertain": "claimed",
+                "failed": "rejected",
+            }[check.status]
+            source = "planner_agentview_placement_assessment"
         elif check.fact == "handle_level" and (
             not drawer or check.value != drawer.target_level
         ):
