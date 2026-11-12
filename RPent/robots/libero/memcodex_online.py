@@ -678,6 +678,7 @@ class M2LiberoToolkit(LiberoToolkit):
                     **cached["trace"],
                     "cache_hit": True,
                     "repeated_query": True,
+                    "new_review_decisions": 0,
                     "files_read": 0,
                     "files_opened": [],
                     "elapsed_ms": 0.0,
