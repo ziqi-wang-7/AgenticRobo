@@ -385,7 +385,15 @@ class M2LiberoToolkit(LiberoToolkit):
                 else None
             )
             failed = bool(result.get("error") or grasp_status == "failed")
-            failure_state = {}
+            failure_state = (
+                {
+                    "failure_kind": "grasp_not_closed",
+                    "failure_object": held_object,
+                    "phase": "grasp",
+                }
+                if grasp_status == "failed" and held_object
+                else {}
+            )
             if failure is not None:
                 failure = FailureObservation.model_validate(failure, strict=True)
                 failure_state = validate_failure(failure, record, objects)
