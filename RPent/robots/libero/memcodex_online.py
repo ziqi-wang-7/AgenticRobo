@@ -74,6 +74,52 @@ def make_controller(record: dict) -> MemCodexController:
     )
 
 
+def _resolve_schema_ref(root: dict[str, Any], node: dict[str, Any]) -> dict[str, Any]:
+    """Resolve a local JSON Schema reference emitted for a nested tool model."""
+    reference = node.get("$ref")
+    if not reference:
+        return node
+    if not reference.startswith("#/"):
+        raise RuntimeError(f"Unsupported external tool-schema reference: {reference}")
+    resolved: Any = root
+    for component in reference[2:].split("/"):
+        component = component.replace("~1", "/").replace("~0", "~")
+        resolved = resolved[component]
+    if not isinstance(resolved, dict):
+        raise RuntimeError(f"Invalid tool-schema reference: {reference}")
+    return resolved
+
+
+def validate_identity_tool_schema(declaration: Any) -> None:
+    """Fail fast unless both runtime validation and published schema expose identity checks."""
+    schemas = {
+        "runtime validator": declaration.args_schema.model_json_schema(),
+        "published tool": declaration.input_schema,
+    }
+    for label, root in schemas.items():
+        visual = root.get("properties", {}).get("visual_checks")
+        if not isinstance(visual, dict):
+            raise RuntimeError(
+                f"M2.2 requires visual_checks in the {label} retrieve_memory schema"
+            )
+        items = visual.get("items")
+        if not isinstance(items, dict):
+            raise RuntimeError(
+                f"M2.2 requires array item schema for visual_checks in the {label}"
+            )
+        item_schema = _resolve_schema_ref(root, items)
+        properties = item_schema.get("properties", {})
+        fact_schema = properties.get("fact", {})
+        facts = set(fact_schema.get("enum", ()))
+        missing = {"identity"} - facts
+        if missing or not {"value", "status"} <= set(properties):
+            raise RuntimeError(
+                "M2.2 runtime tool schema is stale: visual_checks must expose "
+                "fact=identity plus value and status; restart the LIBERO/MCP server "
+                "with the current AgenticRobo checkout."
+            )
+
+
 def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
     """Bind an immutable index without loading memory bodies into the prompt."""
     root, index = (
@@ -176,15 +222,16 @@ class M2LiberoToolkit(LiberoToolkit):
                 replace=True,
             )
         self.add_tool(self._retrieval_tool())
+        validate_identity_tool_schema(self._tools["retrieve_memory"])
 
     def _retrieval_tool(self):
-        """Publish drawer fields only for indexed drawer tasks."""
-        profile = self.memory.controller.indexed.profile(self.memory.record["task"])
-        return (
-            self.retrieve_memory
-            if profile.get("drawer_goal")
-            else self._retrieve_general
-        )
+        """Publish the full current-step schema for every M2 task.
+
+        The general legacy wrapper only accepts ManipulationVisualCheck and
+        silently omits identity/value/status. All M2 tasks must use the unified
+        ActionVisualCheck contract; drawer-only fields remain optional.
+        """
+        return self.retrieve_memory
 
     def _capture_localization(self, original: Any, **kwargs: Any) -> ToolResult:
         result = original(**kwargs)
