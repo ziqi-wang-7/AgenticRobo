@@ -321,7 +321,7 @@ def test_unverified_action_facts_request_observation_not_memory_review():
     context = RoutingContext(
         layer="skills",
         query=None,
-        memory_missing=(),
+        memory_missing=("skill_guidance",),
         action_missing_facts=(),
         action_unverified_facts=("identity:white_mug",),
         review_entries=(),
