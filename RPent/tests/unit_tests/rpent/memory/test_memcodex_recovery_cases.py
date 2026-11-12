@@ -100,6 +100,24 @@ def test_t6_failure_language_maps_to_structured_recovery(issue, expected):
     assert requirements({"issue": issue}) == expected
 
 
+def test_explicit_failure_keeps_additional_causes_from_issue_text():
+    assert requirements(
+        {
+            "failure_kind": "placement_not_satisfied",
+            "issue": (
+                "Pudding released on negative-y side. Need spatial placement "
+                "correction toward positive-y."
+            ),
+        }
+    ) == ("placement_not_satisfied", "wrong_spatial_relation")
+    assert requirements(
+        {
+            "failure_kind": "object_collision",
+            "issue": "Gripper housing brushed the mug; the mug now leans over the plate.",
+        }
+    ) == ("object_collision", "object_tipped")
+
+
 def test_spatial_recovery_case_extracts_push_rotate_and_relocalize_remedy():
     text = (
         "Right-side relation unmet for the chocolate pudding box. "
