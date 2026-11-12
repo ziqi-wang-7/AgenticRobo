@@ -538,7 +538,7 @@ def _candidate_route(
         or (
             action == "OBSERVE"
             and (
-                not context.action_missing_facts
+                not (context.action_missing_facts or context.action_unverified_facts)
                 or (
                     not context.memory_read_complete
                     and context.layer != "raw"
