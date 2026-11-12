@@ -156,9 +156,9 @@ def _failure_context(state: dict, kind: str) -> dict:
     for item in state.get("failure_cases", ()):
         if item.get("failure_kind") == kind:
             return item
-    if state.get("failure_kind") == kind or not state.get("failure_cases"):
-        return state
-    return {}
+    # Backward-compatible single-failure fields remain the fallback for
+    # inferred issue kinds without a separately attributed FailureObservation.
+    return state
 
 
 def covers(case: dict, kind: str, state: dict) -> bool:
