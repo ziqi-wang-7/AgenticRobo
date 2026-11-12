@@ -371,7 +371,10 @@ class M2LiberoToolkit(LiberoToolkit):
             candidate: Proposed primitive, parameters and object roles.
             visual_checks: Current image-attributed holding/placement checks.
             rejected_entries: Inapplicable returned IDs for this step/candidate.
-            failure: Optional specific failure attributed to a current image.
+            failure: Optional single failure attributed to a current image.
+            failures: Multiple independently attributed causes/objects from current images.
+            delivered_entries: IDs whose full bodies remain visible in active context.
+            force_full_delivery: Rehydrate full bodies after compaction or uncertain retention.
         """
         return self.retrieve_memory(
             step=step,
@@ -421,7 +424,10 @@ class M2LiberoToolkit(LiberoToolkit):
             candidate: Proposed primitive, parameters and object roles.
             visual_checks: Current image-attributed manipulation/drawer checks.
             rejected_entries: Inapplicable returned IDs for this step/candidate.
-            failure: Optional specific failure attributed to a current image.
+            failure: Optional single failure attributed to a current image.
+            failures: Multiple independently attributed causes/objects from current images.
+            delivered_entries: IDs whose full bodies remain visible in active context.
+            force_full_delivery: Rehydrate full bodies after compaction or uncertain retention.
             drawer_progress: Drawer progress attributed to consecutive images.
         """
         with self._memory_lock:
