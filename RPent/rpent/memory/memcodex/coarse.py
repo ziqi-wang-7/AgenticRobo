@@ -214,7 +214,7 @@ def retrieve_indexed(
             else None,
             "failure_context": {
                 key: state[key]
-                for key in ("failure_kind", "failure_object", "phase")
+                for key in ("failure_kind", "failure_object", "phase", "failure_cases")
                 if state.get(key)
             },
             "purpose": purpose,
