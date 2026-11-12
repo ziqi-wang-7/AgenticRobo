@@ -18,7 +18,7 @@ import json
 
 import pytest
 
-from rpent.memory.memcodex.policy import ActionQuery, RoutingDecision
+from rpent.memory.memcodex.policy import ActionFact, ActionQuery, RoutingDecision
 from tests.unit_tests.rpent.memory import test_memcodex_m2_contracts as m2
 from tests.unit_tests.rpent.memory.test_memcodex_descent_contracts import add_entry
 
@@ -238,6 +238,68 @@ def test_spatial_raw_fallback_does_not_claim_unrelated_body_as_coverage(indexed)
     assert "recovery_case:wrong_spatial_relation" in result.memory_missing
     assert result.routing_steps[-1]["action"] == "EXHAUSTED"
     assert "raw" in result.layers_visited
+
+
+def test_recovery_raw_fallback_is_not_stopped_by_unverified_action_facts(indexed):
+    wanted = add_entry(
+        indexed,
+        "raw/spatial_action",
+        source="task-family/object.md",
+        text=(
+            "Right-side relation unmet for the chocolate pudding box. "
+            "There is not enough grasp space near the mug. Push the pudding box "
+            "aside, rotate the wrist, create more space, re-localize and retry."
+        ),
+        skills=("pi0_pick", "move_to", "release"),
+        provides=("skill", "recovery"),
+    )
+    control = m2.controller(indexed)
+    query = ActionQuery(
+        tool="pi0_pick",
+        step=7,
+        required_facts=("localized:milk", "identity:milk"),
+        facts=(
+            ActionFact(
+                key="localized:milk",
+                status="verified",
+                evidence_ref="loc-0007",
+                source="current_perception",
+            ),
+            ActionFact(
+                key="identity:milk",
+                status="claimed",
+                evidence_ref="7:agentview.png",
+                source="planner_identity_claim",
+            ),
+        ),
+    )
+    result = control.retrieve_with_trace(
+        m2.TASK,
+        {
+            "task_language": m2.LANGUAGE,
+            "localized_objects": ["milk"],
+        },
+        {
+            "purpose": "recover",
+            "issue": "right-side relation unmet",
+            "failure_object": "chocolate_pudding",
+            "phase": "recovery",
+            "available_skills": ["pi0_pick", "move_to", "release"],
+        },
+        action_query=query,
+    )
+
+    assert wanted in result.selected_ids
+    assert "raw" in result.layers_visited
+    assert result.memory_read_complete
+    assert not result.action_preconditions_met
+    assert result.action_unverified_facts == ("identity:milk",)
+    assert result.routing_decision == "STOP"
+    assert result.routing_reason == "recovery_memory_complete_action_evidence_pending"
+    header_data = header(result)
+    assert header_data["action_preconditions_met"] is False
+    assert header_data["routing_scope"] == "recovery_memory_only"
+    assert header_data["action_execution_authorized"] is False
 
 
 def test_custom_exhausted_cannot_hide_known_guidance(indexed):
