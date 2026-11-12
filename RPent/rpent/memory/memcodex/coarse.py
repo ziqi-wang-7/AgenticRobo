@@ -467,14 +467,24 @@ def retrieve_indexed(
             )
             if 0 < len(focused) < len(next_candidates):
                 narrow_ids = tuple(m["key"] for m in focused)
+        # Recovery retrieval and action readiness are independent gates.
+        # During recovery, keep action gaps in the returned evidence report,
+        # but do not let them stop the memory search before Skills/Raw fallback.
+        routing_action_missing = (
+            () if recovery and action_query is not None
+            else action_missing_facts if action_query is not None
+            else state_missing
+        )
+        routing_action_unverified = (
+            () if recovery and action_query is not None
+            else action_unverified_facts
+        )
         context = RoutingContext(
             layer=layer,
             query=action_query,
             memory_missing=missing,
-            action_missing_facts=action_missing_facts
-            if action_query
-            else state_missing,
-            action_unverified_facts=action_unverified_facts,
+            action_missing_facts=routing_action_missing,
+            action_unverified_facts=routing_action_unverified,
             review_entries=tuple(
                 m["key"]
                 for m, _ in kept
@@ -488,6 +498,20 @@ def retrieve_indexed(
         if action_query is not None:
             routing = _candidate_route(controller, context)
             decision, reason = routing
+            if (
+                recovery
+                and action_query is not None
+                and not (action_missing_facts or action_unverified_facts)
+                and decision == "STOP"
+            ):
+                reason = "recovery_memory_complete"
+            elif (
+                recovery
+                and action_query is not None
+                and (action_missing_facts or action_unverified_facts)
+                and decision == "STOP"
+            ):
+                reason = "recovery_memory_complete_action_evidence_pending"
         else:
             decision = manual_route(context).action
             reason = "memory_coverage_and_current_evidence"
