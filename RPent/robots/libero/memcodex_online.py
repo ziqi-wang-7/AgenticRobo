@@ -484,13 +484,13 @@ class M2LiberoToolkit(LiberoToolkit):
                 entry_id for entry_id, decision in previous_decisions.items()
                 if decision == "rejected"
             )
-            delivered = set(delivered_entries or [])
-            if not delivered <= reviewable_ids:
-                raise ValueError(
-                    "Incremental delivery IDs must have been returned in this step"
-                )
-            if force_full_delivery:
-                delivered.clear()
+            delivered = set()
+            if not force_full_delivery:
+                delivered = set(delivered_entries or [])
+                if not delivered <= reviewable_ids:
+                    raise ValueError(
+                        "Incremental delivery IDs must have been returned in this step"
+                    )
             result = record.result or {}
             action = (record.command or {}).get("action")
             held_object = (
@@ -548,14 +548,27 @@ class M2LiberoToolkit(LiberoToolkit):
                     for item in failure_cases
                 }
                 failure_cases = list(unique_cases.values())
-                if failure_state and any(
-                    item["failure_kind"] != failure_state["failure_kind"]
-                    for item in failure_cases
-                ):
-                    failure_state["failure_cases"] = failure_cases
+                if failure_state:
+                    failure_cases = [
+                        failure_state,
+                        *[
+                            item
+                            for item in failure_cases
+                            if (
+                                item["failure_kind"],
+                                item["failure_object"],
+                                item["phase"],
+                            )
+                            != (
+                                failure_state["failure_kind"],
+                                failure_state["failure_object"],
+                                failure_state["phase"],
+                            )
+                        ],
+                    ]
                 else:
                     failure_state = dict(failure_cases[0])
-                    failure_state["failure_cases"] = failure_cases
+                failure_state["failure_cases"] = failure_cases
             progress_data = None
             if drawer_progress is not None:
                 if not profile.get("drawer_goal"):
@@ -625,6 +638,8 @@ class M2LiberoToolkit(LiberoToolkit):
                 ],
                 "review_decision_scope": failure_signature,
                 "review_decisions": dict(previous_decisions),
+                "reviewed_entry_count": len(previous_decisions),
+                "new_review_decisions": len(confirmed | rejected),
                 "incremental_delivery": {
                     "requested_delivered_ids": sorted(delivered),
                     "force_full_delivery": force_full_delivery,
