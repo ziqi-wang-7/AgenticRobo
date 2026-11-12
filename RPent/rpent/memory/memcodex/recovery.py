@@ -127,7 +127,7 @@ def recovery_cases(text: str) -> list[dict]:
         else:
             # Attribute each cause to the sentence that describes its symptom,
             # not every object mentioned in the whole recovery paragraph.
-            symptom_sentences = re.split(r"(?<=[.!?])\\s+", passage)
+            symptom_sentences = re.split(r"(?<=[.!?])\s+", passage)
             symptom_sentences = [
                 sentence for sentence in symptom_sentences if failure_kinds(sentence)
             ] or [passage]
