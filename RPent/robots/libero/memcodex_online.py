@@ -696,11 +696,21 @@ class M2LiberoToolkit(LiberoToolkit):
             if cached is not None:
                 response_context = _omit_repeated_memory_bodies(cached["context"])
                 response = ToolResult(data={"memory_context": response_context})
+                cached_info = json.loads(response_context.splitlines()[1])
                 trace = {
                     **cached["trace"],
                     "cache_hit": True,
                     "repeated_query": True,
                     "new_review_decisions": 0,
+                    "incremental_delivery": {
+                        "requested_delivered_ids": cached_info.get("already_delivered_ids", []),
+                        "new_memory_ids": [],
+                        "already_delivered_ids": cached_info.get("already_delivered_ids", []),
+                        "new_memory_tokens": 0,
+                        "recovery_coverage": cached_info.get("recovery_coverage", False),
+                        "unresolved_failures": cached_info.get("unresolved_failures", []),
+                        "force_full_delivery": False,
+                    },
                     "files_read": 0,
                     "files_opened": [],
                     "elapsed_ms": 0.0,
@@ -723,6 +733,7 @@ class M2LiberoToolkit(LiberoToolkit):
             self._memory_seen.setdefault(review_scope, set()).update(
                 retrieved.selected_ids
             )
+            response_info = json.loads(retrieved.context.splitlines()[1])
             trace = {
                 **asdict(retrieved),
                 "step": step,
@@ -748,6 +759,11 @@ class M2LiberoToolkit(LiberoToolkit):
                 "new_review_decisions": len(new_review_ids),
                 "incremental_delivery": {
                     "requested_delivered_ids": sorted(delivered),
+                    "new_memory_ids": response_info.get("new_memory_ids", []),
+                    "already_delivered_ids": response_info.get("already_delivered_ids", []),
+                    "new_memory_tokens": response_info.get("new_memory_tokens", 0),
+                    "recovery_coverage": response_info.get("recovery_coverage", False),
+                    "unresolved_failures": response_info.get("unresolved_failures", []),
                     "force_full_delivery": force_full_delivery,
                 },
                 "drawer_progress": progress_data,
