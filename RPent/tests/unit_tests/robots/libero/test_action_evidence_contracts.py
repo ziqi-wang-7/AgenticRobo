@@ -297,6 +297,50 @@ def test_release_requires_correct_holding_and_placement_claims(action_run):
     }
 
 
+def test_verified_placement_ready_maps_to_verified_action_fact(action_run):
+    kit, record, config = action_run
+    record.artifacts.update({"agentview.png", "wrist.png"})
+    localizations = {"basket": m2.localize(kit)}
+    checks = [
+        {
+            "fact": "identity",
+            "object_id": "basket",
+            "value": "basket",
+            "status": "verified",
+            "step": 0,
+            "artifact": "agentview.png",
+        },
+        {
+            "fact": "holding",
+            "object_id": "milk",
+            "status": "verified",
+            "step": 0,
+            "artifact": "wrist.png",
+        },
+        {
+            "fact": "placement_ready",
+            "object_id": "basket",
+            "value": True,
+            "status": "verified",
+            "step": 0,
+            "artifact": "agentview.png",
+        },
+    ]
+    kit.retrieve_memory(
+        step=0,
+        candidate={"tool": "release", "args": {}, "roles": _carry()["roles"]},
+        localizations=localizations,
+        visual_checks=checks,
+    )
+    trace = _trace(config)
+    facts = {fact["key"]: fact for fact in trace["action_query"]["facts"]}
+    assert facts["placement_ready:basket"]["status"] == "verified"
+    assert facts["placement_ready:basket"]["source"] == (
+        "planner_agentview_placement_assessment"
+    )
+    assert trace["action_preconditions_met"]
+
+
 def test_identity_requires_current_agentview_attestation(action_run):
     kit, record, config = action_run
     record.artifacts.add("agentview_high.png")
