@@ -192,8 +192,14 @@ def test_spatial_failure_uses_bounded_raw_fallback_when_index_case_missing(index
     entry["recovery_cases"] = []
     index.write_bytes(encoded(data))
 
+    control = m2.controller(indexed)
+    control.indexed.index["tasks"][m2.TASK]["layers"]["raw"] = [
+        item
+        for item in control.indexed.index["tasks"][m2.TASK]["layers"]["raw"]
+        if item["key"] == wanted
+    ]
     result = m2.query(
-        m2.controller(indexed),
+        control,
         purpose="recover",
         issue="right-side relation unmet",
         failure_object="chocolate_pudding",
@@ -215,8 +221,14 @@ def test_spatial_raw_fallback_does_not_claim_unrelated_body_as_coverage(indexed)
         skills=("pi0_pick", "move_to", "release"),
         provides=("skill", "recovery"),
     )
+    control = m2.controller(indexed)
+    control.indexed.index["tasks"][m2.TASK]["layers"]["raw"] = [
+        item
+        for item in control.indexed.index["tasks"][m2.TASK]["layers"]["raw"]
+        if item["key"] == "raw:unrelated_spatial"
+    ]
     result = m2.query(
-        m2.controller(indexed),
+        control,
         purpose="recover",
         issue="right-side relation unmet",
         failure_object="chocolate_pudding",
