@@ -537,13 +537,10 @@ def _candidate_route(
         )
         or (
             action == "OBSERVE"
-            and (
-                not (context.action_missing_facts or context.action_unverified_facts)
-                or (
-                    not context.memory_read_complete
-                    and context.layer != "raw"
-                    and not context.defer_for_localization
-                )
+            and not (
+                context.action_missing_facts
+                or context.action_unverified_facts
+                or context.defer_for_localization
             )
         )
         or (
