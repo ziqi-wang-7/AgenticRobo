@@ -106,8 +106,8 @@ def _visual_check_item_schema(
     return None
 
 
-def validate_identity_tool_schema(declaration: Any) -> None:
-    """Fail fast unless both runtime validation and published schema expose identity checks."""
+def validate_identity_tool_schema(declaration: Any) -> dict[str, Any]:
+    """Fail fast unless runtime and published schemas expose identity checks."""
     schemas = {
         "runtime validator": declaration.args_schema.model_json_schema(),
         "published tool": declaration.input_schema,
@@ -132,6 +132,17 @@ def validate_identity_tool_schema(declaration: Any) -> None:
                 "fact=identity plus value and status; restart the LIBERO/MCP server "
                 "with the current AgenticRobo checkout."
             )
+    return {
+        "tool_name": declaration.name,
+        "runtime_validator_sha256": hashlib.sha256(
+            json.dumps(schemas["runtime validator"], sort_keys=True).encode()
+        ).hexdigest(),
+        "published_schema_sha256": hashlib.sha256(
+            json.dumps(schemas["published tool"], sort_keys=True).encode()
+        ).hexdigest(),
+        "identity_fact_supported": True,
+        "visual_check_fields": ["fact", "object_id", "step", "artifact", "value", "status"],
+    }
 
 
 def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
@@ -236,7 +247,13 @@ class M2LiberoToolkit(LiberoToolkit):
                 replace=True,
             )
         self.add_tool(self._retrieval_tool())
-        validate_identity_tool_schema(self._tools["retrieve_memory"])
+        schema_audit = validate_identity_tool_schema(self._tools["retrieve_memory"])
+        schema_audit["contract"] = "M2.2-A.2"
+        schema_audit["source_revision"] = SOURCE_REVISION
+        (self.memory.output_dir / "m2-runtime-tool-schema.json").write_text(
+            json.dumps(schema_audit, indent=2) + "\\n",
+            encoding="utf-8",
+        )
 
     def _retrieval_tool(self):
         """Publish the full current-step schema for every M2 task.
