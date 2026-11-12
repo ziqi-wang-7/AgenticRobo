@@ -146,6 +146,8 @@ def retrieve_indexed(
         ) or (recovery and "recovery" in metadata["provides"])
 
     def review_entries(items: list[tuple[dict, str]]) -> tuple[str, ...]:
+        if state.get("review_limit_reached"):
+            return ()
         return tuple(
             m["key"]
             for m, _ in items
@@ -239,6 +241,7 @@ def retrieve_indexed(
             "missing": missing,
             "selected_ids": [m["key"] for m, _ in items],
             "review_entries": review_entries(items),
+            "review_limit_reached": bool(state.get("review_limit_reached")),
             "new_memory_ids": [
                 m["key"] for m, _ in items if m["key"] not in delivered_entries
             ],
