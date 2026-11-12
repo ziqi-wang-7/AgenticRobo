@@ -107,16 +107,15 @@ def manual_route(context: RoutingContext) -> RoutingDecision:
     """Read candidate guidance, then distinguish observation from review gaps."""
     if context.defer_for_localization:
         return RoutingDecision("OBSERVE")
+    # Action facts are independent of memory coverage. If they are absent or
+    # unverified, gather fresh current-step perception before asking the
+    # planner to review more historical memory.
+    if context.action_missing_facts or context.action_unverified_facts:
+        return RoutingDecision("OBSERVE")
     if context.memory_missing and not context.searchable_missing:
         return RoutingDecision("EXHAUSTED")
-    if context.memory_read_complete or context.layer == "raw":
-        # Missing or unverified action facts are perception/state gaps, not
-        # memory-applicability questions. Re-reading the same memory cannot
-        # resolve them; request fresh observation instead of looping REVIEW.
-        if context.action_missing_facts or context.action_unverified_facts:
-            return RoutingDecision("OBSERVE")
-        if context.memory_read_complete:
-            return RoutingDecision("STOP")
+    if context.memory_read_complete:
+        return RoutingDecision("STOP")
     unresolved_case = any(
         m.startswith("recovery_case:") for m in context.memory_missing
     )
