@@ -499,6 +499,7 @@ class M2LiberoToolkit(LiberoToolkit):
                     "candidate may be reviewed"
                 )
             previous_decisions = self._review_decisions.setdefault(decision_scope, {})
+            new_review_ids = (confirmed | rejected) - set(previous_decisions)
             for entry_id in confirmed:
                 previous = previous_decisions.get(entry_id)
                 if previous == "rejected":
@@ -719,7 +720,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 "review_decision_scope": failure_signature,
                 "review_decisions": dict(previous_decisions),
                 "reviewed_entry_count": len(previous_decisions),
-                "new_review_decisions": len(confirmed | rejected),
+                "new_review_decisions": len(new_review_ids),
                 "incremental_delivery": {
                     "requested_delivered_ids": sorted(delivered),
                     "force_full_delivery": force_full_delivery,
