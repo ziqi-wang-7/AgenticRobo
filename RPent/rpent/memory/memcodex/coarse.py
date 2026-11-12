@@ -394,6 +394,10 @@ def retrieve_indexed(
                     and remaining
                     and all(m.startswith("recovery_case:") for m in remaining)
                     and "recovery_cases" in metadata
+                    and not (
+                        layer == "raw"
+                        and bool(set(required_recovery) & RAW_FALLBACK_FAILURES)
+                    )
                     and not any(
                         covers(case, m.removeprefix("recovery_case:"), state)
                         for m in remaining
