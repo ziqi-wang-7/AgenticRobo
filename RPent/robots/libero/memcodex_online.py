@@ -661,9 +661,11 @@ class M2LiberoToolkit(LiberoToolkit):
             }
             if rejected:
                 state["rejected_entries"] = sorted(rejected)
+            memory.controller.indexed.check_revision()
             request_fingerprint = hashlib.sha256(
                 json.dumps(
                     {
+                        "corpus_revision": memory.controller.indexed.revision,
                         "step": step,
                         "purpose": purpose,
                         "candidate_fingerprint": candidate_fingerprint,
