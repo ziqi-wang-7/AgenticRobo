@@ -237,6 +237,7 @@ def retrieve_indexed(
             "state_missing": state_missing,
             "state_evidence_complete": not state_missing,
             "missing": missing,
+            "selected_ids": [m["key"] for m, _ in items],
             "review_entries": review_entries(items),
             "new_memory_ids": [
                 m["key"] for m, _ in items if m["key"] not in delivered_entries
