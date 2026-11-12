@@ -37,6 +37,7 @@ from robots.libero.memcodex import SOURCE_REVISION
 from robots.libero.recovery_evidence import (
     DrawerProgress,
     FailureObservation,
+    classify_grasp,
     drawer_progress_failure,
     motion_alert,
     validate_failure,
@@ -325,6 +326,10 @@ class M2LiberoToolkit(LiberoToolkit):
                     )
                 evidence[name] = {"id": key, **item}
             normalized_candidate, action_query = None, None
+            normalized_visual_checks = [
+                ActionVisualCheck.model_validate(check, strict=True)
+                for check in visual_checks or ()
+            ]
             if candidate is not None:
                 normalized_candidate, action_query = build_action_query(
                     ActionCandidate.model_validate(candidate, strict=True),
@@ -334,10 +339,7 @@ class M2LiberoToolkit(LiberoToolkit):
                     drawer_goal=profile.get("drawer_goal"),
                     localizations=evidence,
                     artifacts=record.artifacts,
-                    visual_checks=[
-                        ActionVisualCheck.model_validate(check, strict=True)
-                        for check in visual_checks or ()
-                    ],
+                    visual_checks=normalized_visual_checks,
                 )
             elif visual_checks:
                 raise ValueError("Visual checks require an action candidate")
@@ -359,10 +361,30 @@ class M2LiberoToolkit(LiberoToolkit):
                 )
             result = record.result or {}
             action = (record.command or {}).get("action")
-            failed = bool(
-                result.get("error")
-                or (action == "pi0_pick" and result.get("success") is False)
+            held_object = (
+                normalized_candidate.get("roles", {}).get("held_object")
+                if normalized_candidate
+                else None
             )
+            holding_check = next(
+                (
+                    check
+                    for check in normalized_visual_checks
+                    if check.fact == "holding" and check.object_id == held_object
+                ),
+                None,
+            )
+            grasp_status = (
+                classify_grasp(
+                    pi0_success=result.get("success")
+                    if action == "pi0_pick"
+                    else None,
+                    visual_status=holding_check.status if holding_check else None,
+                )
+                if action == "pi0_pick" or holding_check is not None
+                else None
+            )
+            failed = bool(result.get("error") or grasp_status == "failed")
             failure_state = {}
             if failure is not None:
                 failure = FailureObservation.model_validate(failure, strict=True)
@@ -426,6 +448,8 @@ class M2LiberoToolkit(LiberoToolkit):
                 "issue_source": "planner",
                 "last_action": action,
                 "last_action_failed": failed,
+                "grasp_status": grasp_status,
+                "pi0_success_hint": result.get("success") if action == "pi0_pick" else None,
                 "failure_observation": failure.model_dump() if failure else None,
                 "drawer_progress": progress_data,
                 "terminated": record.terminated,
