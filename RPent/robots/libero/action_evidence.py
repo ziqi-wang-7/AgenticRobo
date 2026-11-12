@@ -229,6 +229,8 @@ def build_action_query(
             )
 
         seen_claims.add(key)
+        if check.fact == "identity":
+            facts = [fact for fact in facts if fact.key != key]
         facts.append(
             ActionFact(
                 key=key,
