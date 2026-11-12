@@ -244,6 +244,7 @@ class M2LiberoToolkit(LiberoToolkit):
         self._memory_lock = RLock()
         self._localization_evidence: dict[str, dict] = {}
         self._memory_seen: dict[tuple[int, str], set[str]] = {}
+        self._review_decisions: dict[tuple[int, str, str], dict[str, str]] = {}
         for name in ("back_project", "segment"):
             original = self._tools[name]
             self.add_tool(
@@ -322,6 +323,9 @@ class M2LiberoToolkit(LiberoToolkit):
         visual_checks: list[ManipulationVisualCheck] | None = None,
         rejected_entries: list[str] | None = None,
         failure: FailureObservation | None = None,
+        failures: list[FailureObservation] | None = None,
+        delivered_entries: list[str] | None = None,
+        force_full_delivery: bool = False,
     ) -> ToolResult:
         """Read indexed guidance; inspect state gaps and unavailable recovery matches.
 
@@ -351,6 +355,9 @@ class M2LiberoToolkit(LiberoToolkit):
             ],
             rejected_entries=rejected_entries,
             failure=failure,
+            failures=failures,
+            delivered_entries=delivered_entries,
+            force_full_delivery=force_full_delivery,
         )
 
     @tool(readonly=True)
@@ -365,7 +372,10 @@ class M2LiberoToolkit(LiberoToolkit):
         visual_checks: list[ActionVisualCheck] | None = None,
         rejected_entries: list[str] | None = None,
         failure: FailureObservation | None = None,
+        failures: list[FailureObservation] | None = None,
         drawer_progress: DrawerProgress | None = None,
+        delivered_entries: list[str] | None = None,
+        force_full_delivery: bool = False,
     ) -> ToolResult:
         """Read task experience from summary through raw evidence only as needed.
 
@@ -426,21 +436,61 @@ class M2LiberoToolkit(LiberoToolkit):
             elif visual_checks:
                 raise ValueError("Visual checks require an action candidate")
 
-            review_scope = (step, action_query.fingerprint if action_query else "")
+            candidate_fingerprint = action_query.fingerprint if action_query else ""
+            review_scope = (step, candidate_fingerprint)
+            failure_signature = hashlib.sha256(
+                json.dumps(
+                    {
+                        "purpose": purpose,
+                        "issue": " ".join(issue.casefold().split()),
+                        "failure": failure.model_dump() if failure else None,
+                        "failures": [
+                            item.model_dump() if isinstance(item, FailureObservation) else item
+                            for item in (failures or ())
+                        ],
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            decision_scope = (step, candidate_fingerprint, failure_signature)
             confirmed = set(applicable_entries or [])
             rejected = set(rejected_entries or [])
             if confirmed & rejected:
                 raise ValueError("An entry cannot be both applicable and rejected")
             reviewable_ids = _reviewable_memory_ids(
-                self._memory_seen,
-                step,
-                action_query.fingerprint if action_query else "",
+                self._memory_seen, step, candidate_fingerprint
             )
             if not (confirmed | rejected) <= reviewable_ids:
                 raise ValueError(
                     "Only entries returned by this step's overview or this exact "
                     "candidate may be reviewed"
                 )
+            previous_decisions = self._review_decisions.setdefault(decision_scope, {})
+            for entry_id in confirmed:
+                previous = previous_decisions.get(entry_id)
+                if previous == "rejected":
+                    raise ValueError(f"Conflicting repeated Memory review: {entry_id}")
+                previous_decisions[entry_id] = "applicable"
+            for entry_id in rejected:
+                previous = previous_decisions.get(entry_id)
+                if previous == "applicable":
+                    raise ValueError(f"Conflicting repeated Memory review: {entry_id}")
+                previous_decisions[entry_id] = "rejected"
+            confirmed.update(
+                entry_id for entry_id, decision in previous_decisions.items()
+                if decision == "applicable"
+            )
+            rejected.update(
+                entry_id for entry_id, decision in previous_decisions.items()
+                if decision == "rejected"
+            )
+            delivered = set(delivered_entries or [])
+            if not delivered <= reviewable_ids:
+                raise ValueError(
+                    "Incremental delivery IDs must have been returned in this step"
+                )
+            if force_full_delivery:
+                delivered.clear()
             result = record.result or {}
             action = (record.command or {}).get("action")
             held_object = (
@@ -476,9 +526,36 @@ class M2LiberoToolkit(LiberoToolkit):
                 if grasp_status == "failed" and held_object
                 else {}
             )
+            failure_cases = []
             if failure is not None:
                 failure = FailureObservation.model_validate(failure, strict=True)
-                failure_state = validate_failure(failure, record, objects)
+                failure_cases.append(validate_failure(failure, record, objects))
+            normalized_failures = [
+                FailureObservation.model_validate(item, strict=True)
+                for item in (failures or ())
+            ]
+            failure_cases.extend(
+                validate_failure(item, record, objects)
+                for item in normalized_failures
+            )
+            if failure_cases:
+                unique_cases = {
+                    (
+                        item["failure_kind"],
+                        item["failure_object"],
+                        item["phase"],
+                    ): item
+                    for item in failure_cases
+                }
+                failure_cases = list(unique_cases.values())
+                if failure_state and any(
+                    item["failure_kind"] != failure_state["failure_kind"]
+                    for item in failure_cases
+                ):
+                    failure_state["failure_cases"] = failure_cases
+                else:
+                    failure_state = dict(failure_cases[0])
+                    failure_state["failure_cases"] = failure_cases
             progress_data = None
             if drawer_progress is not None:
                 if not profile.get("drawer_goal"):
@@ -514,6 +591,8 @@ class M2LiberoToolkit(LiberoToolkit):
                 "issue": issue,
                 "last_action": action,
                 "applicable_entries": sorted(confirmed),
+                "delivered_entries": sorted(delivered),
+                "force_full_delivery": force_full_delivery,
                 **failure_state,
             }
             if rejected:
@@ -541,6 +620,15 @@ class M2LiberoToolkit(LiberoToolkit):
                 "grasp_status": grasp_status,
                 "pi0_success_hint": result.get("success") if action == "pi0_pick" else None,
                 "failure_observation": failure.model_dump() if failure else None,
+                "failure_observations": [
+                    item.model_dump() for item in normalized_failures
+                ],
+                "review_decision_scope": failure_signature,
+                "review_decisions": dict(previous_decisions),
+                "incremental_delivery": {
+                    "requested_delivered_ids": sorted(delivered),
+                    "force_full_delivery": force_full_delivery,
+                },
                 "drawer_progress": progress_data,
                 "terminated": record.terminated,
                 "truncated": record.truncated,
