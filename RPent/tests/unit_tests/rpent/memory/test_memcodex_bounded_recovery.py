@@ -212,6 +212,37 @@ def test_spatial_failure_uses_bounded_raw_fallback_when_index_case_missing(index
     assert result.files_read <= 5
 
 
+def test_recovery_without_localization_still_searches_raw(indexed):
+    wanted = add_entry(
+        indexed,
+        "raw/spatial_without_geometry",
+        source="task-family/object.md",
+        text=(
+            "Right-side relation unmet for the chocolate pudding box. "
+            "Create more grasp space by pushing the box aside, rotate the wrist, "
+            "re-localize and retry."
+        ),
+        skills=("pi0_pick", "move_to", "release"),
+        provides=("skill", "recovery"),
+    )
+    result = m2.query(
+        m2.controller(indexed),
+        purpose="recover",
+        localized=False,
+        issue="right-side relation unmet",
+        failure_object="chocolate_pudding",
+        phase="recovery",
+    )
+    assert wanted in result.selected_ids
+    assert "raw" in result.layers_visited
+    assert result.memory_read_complete
+    assert result.state_missing == ("object_localization",)
+    assert result.routing_decision == "STOP"
+    assert result.routing_reason == "recovery_memory_complete"
+    assert header(result)["routing_scope"] == "memory_only"
+    assert header(result)["execution_authorized"] is False
+
+
 def test_spatial_raw_fallback_does_not_claim_unrelated_body_as_coverage(indexed):
     add_entry(
         indexed,
