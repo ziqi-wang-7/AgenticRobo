@@ -84,6 +84,7 @@ def object_types(text: str) -> set[str]:
             "moka_pot": r"moka[ _-]*pot",
             "mug": r"\bmug\b|_mug\b",
             "bowl": r"\bbowl\b|_bowl\b",
+            "basket": r"\bbasket\b|_basket\b",
             "drawer": r"drawer|cabinet",
             "microwave": r"microwave",
             "milk": r"\bmilk\b",
