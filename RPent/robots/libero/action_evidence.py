@@ -206,7 +206,11 @@ def build_action_query(
                 raise ValueError("Identity evidence requires verified, uncertain or rejected status")
             if check.status == "verified" and check.value != check.object_id:
                 raise ValueError("Verified identity value must equal the task object ID")
-            status = "verified" if check.status == "verified" else "claimed"
+            status = {
+                "verified": "verified",
+                "uncertain": "claimed",
+                "rejected": "rejected",
+            }[check.status]
             source = (
                 "planner_agentview_identity_rejected"
                 if check.status == "rejected"
@@ -217,7 +221,12 @@ def build_action_query(
                 raise ValueError("Grasp evidence must come from the wrist camera")
             if check.status not in {None, "verified", "uncertain", "failed"}:
                 raise ValueError("Holding evidence requires verified, uncertain or failed status")
-            status = "verified" if check.status == "verified" else "claimed"
+            status = {
+                None: "claimed",
+                "verified": "verified",
+                "uncertain": "claimed",
+                "failed": "rejected",
+            }[check.status]
             source = "planner_wrist_grasp_assessment"
         elif check.fact == "handle_level" and (
             not drawer or check.value != drawer.target_level
