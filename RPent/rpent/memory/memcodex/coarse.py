@@ -90,6 +90,13 @@ def retrieve_indexed(
     available = set(state.get("available_skills", ()))
     confirmed = set(state.get("applicable_entries", ()))
     rejected = set(state.get("rejected_entries", ()))
+    # The caller may omit bodies only for entries whose full text is still
+    # present in its active context. After compaction/uncertainty it must set
+    # force_full_delivery and rehydrate them.
+    delivered_entries = (
+        set() if state.get("force_full_delivery")
+        else set(state.get("delivered_entries", ()))
+    )
     if confirmed & rejected:
         raise ValueError("Memory entries cannot be both confirmed and rejected")
     action_missing_facts: tuple[str, ...] = ()
@@ -231,6 +238,25 @@ def retrieve_indexed(
             "state_evidence_complete": not state_missing,
             "missing": missing,
             "review_entries": review_entries(items),
+            "new_memory_ids": [
+                m["key"] for m, _ in items if m["key"] not in delivered_entries
+            ],
+            "already_delivered_ids": [
+                m["key"] for m, _ in items if m["key"] in delivered_entries
+            ],
+            "new_memory_tokens": sum(
+                controller.compressor.count(text)
+                for m, text in items
+                if m["key"] not in delivered_entries
+            ),
+            "recovery_coverage": bool(recovery) and not any(
+                item.startswith("recovery_case:") for item in memory_missing
+            ),
+            "unresolved_failures": [
+                item.removeprefix("recovery_case:")
+                for item in memory_missing
+                if item.startswith("recovery_case:")
+            ],
             "exact_summary_available": bool(profile["layers"]["summary"]),
         }
         if action_query is not None:
@@ -245,7 +271,16 @@ def retrieve_indexed(
                 action_unverified_facts=action_unverified_facts,
                 routing_policy=controller.route_name,
             )
-        return info, "\n\n".join(t for _, t in items)
+        blocks = []
+        for metadata, text in items:
+            if metadata["key"] in delivered_entries:
+                blocks.append(
+                    f"[MEMORY BODY OMITTED: {metadata['key']} was already delivered "
+                    "in the active context; request force_full_delivery if unavailable.]"
+                )
+            else:
+                blocks.append(text)
+        return info, "\n\n".join(blocks)
 
     def render(info: dict, blocks: str, routing: tuple[str, str] | None = None) -> str:
         if routing is not None:
