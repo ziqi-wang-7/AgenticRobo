@@ -682,8 +682,21 @@ also require a separate recovery observation. Do not label an unverified
 suspicion as a confirmed failure. For cluttered grasp recovery, state whether
 the target is blocked, which context object is in the way, and whether creating
 space by moving that object or changing wrist orientation is supported by the
-current images. Recovery retrieval is bounded and must be checked against the
-source body; an unmatched issue is not proof that no useful experience exists.
+current images. If one observation supports multiple distinct causes or objects, pass a
+`failures` list with one current-image-attributed record per cause (kind,
+object_id, phase, step, artifact); do not collapse a collision affecting a mug
+and a grasp-space issue affecting the pudding into one object label.
+Recovery retrieval is bounded and must be checked against the source body; an
+unmatched issue is not proof that no useful experience exists.
+
+For repeated retrieve_memory calls, review each returned Memory ID at most
+once per unchanged step/candidate/failure scope. Repeat the same applicability
+decision only if needed; the runtime registry carries it forward. For
+incremental delivery, pass delivered_entries only when the full body is still
+visible in the active context. If context was compacted or retention is
+uncertain, set force_full_delivery=true and omit delivered_entries so required
+memory is rehydrated. Never treat an omitted body as available merely because
+its ID was seen before.
 
 After retrieving recovery guidance, form a short, explicit action sequence:
 current failure → required precondition → one corrective primitive → expected
