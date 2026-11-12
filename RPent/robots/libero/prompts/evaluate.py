@@ -665,6 +665,19 @@ uncertain, observe again; if failure is visually confirmed, report status=failed
 or failure={kind, object_id, phase, step, artifact} and recover. A false Pi0
 heuristic without visual confirmation is uncertain, not a confirmed failure.
 A servo residual is a request to inspect progress, not proof of contact failure.
+
+For recovery, report a specific current-image-attributed failure kind whenever
+the observation supports it: wrong_spatial_relation, object_collision,
+grasp_space_insufficient, object_tipped, placement_not_satisfied,
+grasp_not_closed, object_slipped, insertion_blocked, release_stuck,
+contact_stalled, or wrong_drawer. Keep distinct causes separate: a wrong
+placement side is not itself a failed grasp; a collision or tipped object may
+also require a separate recovery observation. Do not label an unverified
+suspicion as a confirmed failure. For cluttered grasp recovery, state whether
+the target is blocked, which context object is in the way, and whether creating
+space by moving that object or changing wrist orientation is supported by the
+current images. Recovery retrieval is bounded and must be checked against the
+source body; an unmatched issue is not proof that no useful experience exists.
 """
 )
 
