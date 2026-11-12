@@ -516,6 +516,23 @@ def test_repeated_memory_review_is_idempotent_within_failure_scope(action_run):
     assert repeated["new_review_decisions"] == len(selected)
 
 
+def test_identical_retrieval_query_uses_compact_cached_receipt(action_run):
+    kit, _, config = action_run
+    localizations = {"milk": m2.localize(kit)}
+    first = kit.retrieve_memory(
+        step=0, candidate=_pick(), localizations=localizations
+    )
+    second = kit.retrieve_memory(
+        step=0, candidate=_pick(), localizations=localizations
+    )
+    assert "[MEMORY BODY OMITTED:" in second.data["memory_context"]
+    trace = _trace(config)
+    assert trace["cache_hit"] is True
+    assert trace["repeated_query"] is True
+    assert trace["files_read"] == 0
+    assert first.data["memory_context"] != second.data["memory_context"]
+
+
 def test_incremental_memory_delivery_omits_only_explicitly_retained_bodies(action_run):
     kit, _, config = action_run
     localizations = {"milk": m2.localize(kit)}
