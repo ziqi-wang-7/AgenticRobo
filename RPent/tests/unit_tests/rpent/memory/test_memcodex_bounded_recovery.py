@@ -173,7 +173,7 @@ def test_spatial_failure_uses_bounded_raw_fallback_when_index_case_missing(index
     wanted = add_entry(
         indexed,
         "raw/spatial",
-        source="task-family/libero_10_swap_t6.md",
+        source="task-family/object.md",
         text=(
             "Right-side relation unmet for the chocolate pudding box; there is not "
             "enough grasp space near the mug. Push the pudding box aside, rotate "
@@ -216,7 +216,7 @@ def test_spatial_raw_fallback_does_not_claim_unrelated_body_as_coverage(indexed)
     add_entry(
         indexed,
         "raw/unrelated_spatial",
-        source="task-family/libero_10_swap_t6.md",
+        source="task-family/object.md",
         text="The chocolate pudding box is visible. Use pi0_pick and move_to.",
         skills=("pi0_pick", "move_to", "release"),
         provides=("skill", "recovery"),
