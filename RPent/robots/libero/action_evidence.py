@@ -202,12 +202,16 @@ def build_action_query(
                 raise ValueError("Identity evidence must match the candidate's geometry object")
             if not check.artifact.startswith("agentview"):
                 raise ValueError("Identity evidence must come from the agentview camera")
-            if check.value != check.object_id:
-                raise ValueError("Verified identity value must equal the task object ID")
             if check.status not in {"verified", "uncertain", "rejected"}:
                 raise ValueError("Identity evidence requires verified, uncertain or rejected status")
+            if check.status == "verified" and check.value != check.object_id:
+                raise ValueError("Verified identity value must equal the task object ID")
             status = "verified" if check.status == "verified" else "claimed"
-            source = "planner_agentview_identity_attestation"
+            source = (
+                "planner_agentview_identity_rejected"
+                if check.status == "rejected"
+                else "planner_agentview_identity_attestation"
+            )
         elif check.fact == "holding":
             if not check.artifact.startswith("wrist"):
                 raise ValueError("Grasp evidence must come from the wrist camera")
