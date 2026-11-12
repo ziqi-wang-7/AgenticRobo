@@ -520,7 +520,11 @@ def retrieve_indexed(
                 reason = "recovery_memory_complete_action_evidence_pending"
         else:
             decision = manual_route(context).action
-            reason = "memory_coverage_and_current_evidence"
+            reason = (
+                "recovery_memory_complete"
+                if recovery and decision == "STOP"
+                else "memory_coverage_and_current_evidence"
+            )
         routing_steps.append(
             {
                 "action": decision,
