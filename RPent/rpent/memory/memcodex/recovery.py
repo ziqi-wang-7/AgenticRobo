@@ -25,7 +25,7 @@ import re
 FAILURES = {
     "wrong_drawer": r"wrong (?:drawer|handle|layer)|(?:middle|upper|top) drawer (?:rather than|instead of)|wrong.*drawer|drawer.*wrong|wrong.*layer",
     "wrong_spatial_relation": r"(?:wrong|incorrect|unmet|unsatisfied|not satisfied).{0,45}(?:left|right|side|spatial|relation|placement)|(?:left|right)[ -]side.{0,35}(?:relation|placement).{0,25}(?:unmet|wrong|incorrect|not satisfied)|(?:relation|placement).{0,35}(?:wrong side|wrong direction|not satisfied|unmet)|placed? on the wrong side|spatial placement correction|placement correction.{0,30}(?:right|left|side)",
-    "object_collision": r"\bcollision\b|collid(?:e|ed|ing|es)|bump(?:ed|ing)? into|hit (?:the )?(?:cup|mug|object|obstacle)|brush(?:ed|ing)? (?:against|into|past|the) (?:gripper|housing|cup|mug|object)"|(?:gripper|wrist|housing).{0,35}(?:contact|touch|hit).{0,35}(?:cup|mug|object)|(?:contact|touch).{0,35}(?:cup|mug|object)",
+    "object_collision": r"\bcollision\b|collid(?:e|ed|ing|es)|bump(?:ed|ing)? into|hit (?:the )?(?:cup|mug|object|obstacle)|brush(?:ed|ing)? (?:against|into|past|the) (?:gripper|housing|cup|mug|object)|(?:gripper|wrist|housing).{0,35}(?:contact|touch|hit).{0,35}(?:cup|mug|object)|(?:contact|touch).{0,35}(?:cup|mug|object)",
     "grasp_space_insufficient": r"(?:not enough|insufficient|limited|no).{0,35}(?:grasp|gripping|pickup) space|(?:grasp|gripping|pickup) space.{0,35}(?:insufficient|blocked|too small)|no room to (?:grasp|pick)|obstructed grasp",
     "object_tipped": r"\btipp?ed\b|\btilt(?:ed|ing)?\b|lean(?:s|ed|ing)?(?:\s+(?:slightly|a little|over|to one side))?|fell over|toppl(?:ed|ing)",
     "object_slipped": r"\bslip(?:s|ped|ping)?\b|\bdrop(?:ped|ping)?\b|lost (?:the )?(?:grasp|grip|mug|pot|object)",
