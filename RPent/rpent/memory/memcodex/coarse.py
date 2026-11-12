@@ -211,6 +211,15 @@ def retrieve_indexed(
                 if state.get(key)
             },
             "purpose": purpose,
+            "routing_scope": (
+                "recovery_memory_only"
+                if recovery and action_query is not None
+                else "action_and_memory"
+                if action_query is not None
+                else "memory_only"
+            ),
+            # Retrieval decisions never grant permission to execute a primitive.
+            "execution_authorized": False,
             "required_objects": required_objects,
             "required_skills": profile["required_skills"]
             if action_query is None
