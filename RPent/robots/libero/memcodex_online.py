@@ -143,6 +143,23 @@ class IndexedMemoryManager(FixedMemoryManager):
         return super()._authorize(path, write=write)
 
 
+def _reviewable_memory_ids(
+    memory_seen: dict[tuple[int, str], set[str]],
+    step: int,
+    candidate_fingerprint: str,
+) -> set[str]:
+    """Return IDs shown in this step's overview or this exact candidate scope.
+
+    Overview results are discovery candidates and may be reviewed for a
+    candidate in the same observation step. Results from another candidate or
+    an earlier step remain ineligible.
+    """
+    allowed = set(memory_seen.get((step, ""), set()))
+    if candidate_fingerprint:
+        allowed.update(memory_seen.get((step, candidate_fingerprint), set()))
+    return allowed
+
+
 class M2LiberoToolkit(LiberoToolkit):
     """Add indexed retrieval with auditable, step-bound localization evidence."""
 
@@ -330,9 +347,15 @@ class M2LiberoToolkit(LiberoToolkit):
             rejected = set(rejected_entries or [])
             if confirmed & rejected:
                 raise ValueError("An entry cannot be both applicable and rejected")
-            if not (confirmed | rejected) <= self._memory_seen.get(review_scope, set()):
+            reviewable_ids = _reviewable_memory_ids(
+                self._memory_seen,
+                step,
+                action_query.fingerprint if action_query else "",
+            )
+            if not (confirmed | rejected) <= reviewable_ids:
                 raise ValueError(
-                    "Only entries already returned for this step and candidate may be reviewed"
+                    "Only entries returned by this step's overview or this exact "
+                    "candidate may be reviewed"
                 )
             result = record.result or {}
             action = (record.command or {}).get("action")
