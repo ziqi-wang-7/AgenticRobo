@@ -648,12 +648,23 @@ the pick target or transport/release destination using localizations. Reuse pick
 guidance for its empty-gripper approach; other primitives use ordinary retrieval
 only when guidance is needed. expected_effect is descriptive, not evidence.
 
+For every candidate, identity is a separate fact from geometry. After choosing
+the semantic target in the current agentview image, provide visual_checks with
+fact=identity, object_id=<candidate geometry object>, value=<matching task
+object ID>, status=verified, step=<current step>, artifact=agentview.png or
+agentview_high.png. If the image is ambiguous, use status=uncertain; if it is
+the wrong object, use status=rejected and value=<observed identity>. Never
+promote geometry alone or a repeated planner assertion to verified identity.
+
 For transport/release, visual_checks may attribute holding (held_object) or
-placement_ready (destination) to a saved current camera image. These remain
-claims, as does object identity. Verify that an object follows a short lift and
-stays held during carry; finger gap alone is insufficient. Report an observed
-problem in issue or failure={kind, object_id, phase, step, artifact}. A servo
-residual is a request to inspect progress, not proof of contact failure.
+placement_ready (destination) to a saved current camera image. Holding checks
+must use wrist.png/wrist_high.png and status=verified, uncertain or failed.
+A verified grasp requires the object to follow a short lift and remain in the
+gripper; finger gap and pi0_pick.success alone are insufficient. If evidence is
+uncertain, observe again; if failure is visually confirmed, report status=failed
+or failure={kind, object_id, phase, step, artifact} and recover. A false Pi0
+heuristic without visual confirmation is uncertain, not a confirmed failure.
+A servo residual is a request to inspect progress, not proof of contact failure.
 """
 )
 
