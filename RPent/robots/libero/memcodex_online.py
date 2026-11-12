@@ -50,7 +50,7 @@ from rpent.tools.base import ToolResult, tool
 from rpent.utils.config import get_repo_root
 
 
-MAX_REVIEWED_ENTRIES_PER_FAILURE = 16
+MAX_REVIEWED_ENTRIES_PER_FAILURE = 4
 
 
 def make_controller(record: dict) -> MemCodexController:
@@ -535,8 +535,10 @@ class M2LiberoToolkit(LiberoToolkit):
                 entry_id for entry_id, decision in previous_decisions.items()
                 if decision == "rejected"
             )
+            review_no_progress = bool(previous_decisions) and not new_review_ids
             review_limit_reached = (
                 len(previous_decisions) >= MAX_REVIEWED_ENTRIES_PER_FAILURE
+                or review_no_progress
             )
             delivered = set()
             if not force_full_delivery:
@@ -661,6 +663,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 "delivered_entries": sorted(delivered),
                 "force_full_delivery": force_full_delivery,
                 "review_limit_reached": review_limit_reached,
+                "review_no_progress": review_no_progress,
                 **failure_state,
             }
             if rejected:
@@ -760,6 +763,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 "reviewed_entry_count": len(previous_decisions),
                 "review_limit": MAX_REVIEWED_ENTRIES_PER_FAILURE,
                 "review_limit_reached": review_limit_reached,
+                "review_no_progress": review_no_progress,
                 "new_review_decisions": len(new_review_ids),
                 "incremental_delivery": {
                     "requested_delivered_ids": sorted(delivered),
