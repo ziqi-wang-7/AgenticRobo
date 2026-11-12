@@ -135,6 +135,8 @@ def classify_grasp(
     A current, role-correct wrist-camera assessment is required to verify or
     confirm failure. The Pi0 result is retained as a hint for the audit only.
     """
+    # Pi0's boolean is intentionally not promoted to a physical fact.
+    _ = pi0_success
     if visual_status == "verified":
         return "verified"
     if visual_status == "failed":
