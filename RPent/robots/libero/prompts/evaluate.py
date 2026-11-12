@@ -695,13 +695,18 @@ Recovery retrieval is bounded and must be checked against the source body; an
 unmatched issue is not proof that no useful experience exists.
 
 For repeated retrieve_memory calls, review each returned Memory ID at most
-once per unchanged step/candidate/failure scope. Repeat the same applicability
-decision only if needed; the runtime registry carries it forward. For
-incremental delivery, pass delivered_entries only when the full body is still
-visible in the active context. If context was compacted or retention is
-uncertain, set force_full_delivery=true and omit delivered_entries so required
-memory is rehydrated. Never treat an omitted body as available merely because
-its ID was seen before.
+once per unchanged step/candidate/failure scope. The runtime registry carries
+forward confirmed/rejected decisions. If a repeated review produces no new
+decision, do not request another identical review; obtain new evidence, refine
+the failure description, or report the remaining coverage gap. The runtime
+caps unique review decisions at four per failure scope.
+
+For incremental delivery, pass delivered_entries only when the full body is
+still visible in the active context. This is an explicit context-retention
+attestation, not a record that a tool call happened. If context was compacted
+or retention is uncertain, set force_full_delivery=true and omit
+delivered_entries so required memory is rehydrated. Never treat an omitted body
+as available merely because its ID was seen before.
 
 After retrieving recovery guidance, form a short, explicit action sequence:
 current failure → required precondition → one corrective primitive → expected
