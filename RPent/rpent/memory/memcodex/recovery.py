@@ -27,7 +27,7 @@ FAILURES = {
     "wrong_spatial_relation": r"(?:wrong|incorrect|unmet|unsatisfied|not satisfied).{0,45}(?:left|right|side|spatial|relation|placement)|(?:left|right)[ -]side.{0,35}(?:relation|placement).{0,25}(?:unmet|wrong|incorrect|not satisfied)|(?:relation|placement).{0,35}(?:wrong side|wrong direction|not satisfied|unmet)|placed? on the wrong side",
     "object_collision": r"\bcollision\b|collid(?:e|ed|ing|es)|bump(?:ed|ing)? into|hit (?:the )?(?:cup|mug|object|obstacle)",
     "grasp_space_insufficient": r"(?:not enough|insufficient|limited|no).{0,35}(?:grasp|gripping|pickup) space|(?:grasp|gripping|pickup) space.{0,35}(?:insufficient|blocked|too small)|no room to (?:grasp|pick)|obstructed grasp",
-    "object_tipped": r"\btipp?ed\b|tilt(?:ed|ing)? over|fell over|toppl(?:ed|ing)",
+    "object_tipped": r"\btipp?ed\b|\btilt(?:ed|ing)?\b|fell over|toppl(?:ed|ing)",
     "object_slipped": r"\bslip(?:s|ped|ping)?\b|\bdrop(?:ped|ping)?\b|lost (?:the )?(?:grasp|grip|mug|pot|object)",
     "grasp_not_closed": r"(?:finger|gripper)s?.{0,30}(?:stay|remain|still|left).{0,15}open|no clos|does not close|did not close|no lift|without (?:closing|closure)|open.finger",
     "insertion_blocked": r"(?:insert|insertion|cavity|mouth).{0,60}(?:stall|block|obstruct|jam)|(?:stall|block|obstruct|jam).{0,60}(?:insert|insertion|cavity|mouth)",
