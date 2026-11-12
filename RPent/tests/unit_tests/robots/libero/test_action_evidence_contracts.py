@@ -14,6 +14,7 @@
 
 """LIBERO proposed-action evidence is checked without executing primitives."""
 
+import hashlib
 import json
 from argparse import ArgumentParser
 from dataclasses import replace
@@ -560,6 +561,42 @@ def test_repeated_memory_review_is_idempotent_within_failure_scope(action_run):
     assert repeated["reviewed_entry_count"] == len(selected)
     assert repeated["new_review_decisions"] == 0
     assert repeated["cache_hit"] is True
+
+
+def test_review_limit_stops_further_review_for_same_failure_scope(action_run):
+    kit, _, config = action_run
+    indexed_corpus = kit.memory.controller.indexed
+    for item in indexed_corpus.profile(m2.TASK)["layers"]["skills"]:
+        indexed_corpus.index["entries"][item["path"]]["review_required"] = True
+    localizations = {"milk": m2.localize(kit)}
+    kit.retrieve_memory(
+        step=0, candidate=_pick(), localizations=localizations
+    )
+    first = _trace(config)
+    fingerprint = first["action_query"]["fingerprint"]
+    signature = hashlib.sha256(
+        json.dumps(
+            {
+                "purpose": "execute",
+                "issue": "",
+                "failure": None,
+                "failures": [],
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    kit._review_decisions[(0, fingerprint, signature)] = {
+        f"skills:already-reviewed-{index}": "applicable"
+        for index in range(16)
+    }
+    kit.retrieve_memory(
+        step=0, candidate=_pick(), localizations=localizations
+    )
+    trace = _trace(config)
+    header = json.loads(trace["context"].splitlines()[1])
+    assert header["review_limit_reached"] is True
+    assert header["review_entries"] == []
+    assert trace["review_limit"] == 16
 
 
 def test_identical_retrieval_query_uses_compact_cached_receipt(action_run):
