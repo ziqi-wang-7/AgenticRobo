@@ -321,7 +321,7 @@ def test_identity_rejection_is_not_promoted_to_verified(action_run):
         fact for fact in trace["action_query"]["facts"]
         if fact["key"] == "identity:milk"
     )
-    assert identity["status"] == "claimed"
+    assert identity["status"] == "rejected"
     assert identity["source"] == "planner_agentview_identity_rejected"
 
 
@@ -358,6 +358,11 @@ def test_confirmed_failed_grasp_requests_recovery(action_run):
     assert trace["state"]["needs_recovery"]
     assert trace["state"]["failure_kind"] == "grasp_not_closed"
     assert trace["state"]["failure_object"] == "milk"
+    holding_fact = next(
+        fact for fact in trace["action_query"]["facts"]
+        if fact["key"] == "holding:milk"
+    )
+    assert holding_fact["status"] == "rejected"
 
 
 def test_memory_review_is_scoped_to_normalized_candidate(action_run):
