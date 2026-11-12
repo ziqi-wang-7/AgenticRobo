@@ -118,6 +118,48 @@ def test_explicit_failure_keeps_additional_causes_from_issue_text():
     ) == ("object_collision", "object_tipped")
 
 
+def test_slight_lean_is_classified_as_tipped_and_multi_object_scope_is_separate():
+    assert "object_tipped" in failure_kinds(
+        "The white mug leans slightly after the gripper housing contacts it."
+    )
+    mug_case = {
+        "kind": "object_tipped",
+        "object_types": ["mug"],
+        "phases": ["transport", "recovery"],
+    }
+    pudding_case = {
+        "kind": "object_tipped",
+        "object_types": ["pudding_box"],
+        "phases": ["transport", "recovery"],
+    }
+    state = {
+        "failure_cases": [
+            {
+                "failure_kind": "object_collision",
+                "failure_object": "white_mug",
+                "phase": "transport",
+            },
+            {
+                "failure_kind": "object_tipped",
+                "failure_object": "white_mug",
+                "phase": "transport",
+            },
+            {
+                "failure_kind": "grasp_space_insufficient",
+                "failure_object": "chocolate_pudding",
+                "phase": "grasp",
+            },
+        ]
+    }
+    assert covers(mug_case, "object_tipped", state)
+    assert not covers(pudding_case, "object_tipped", state)
+    assert requirements(state) == (
+        "grasp_space_insufficient",
+        "object_collision",
+        "object_tipped",
+    )
+
+
 def test_spatial_recovery_case_extracts_push_rotate_and_relocalize_remedy():
     text = (
         "Right-side relation unmet for the chocolate pudding box. "
