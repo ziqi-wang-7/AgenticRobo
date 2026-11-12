@@ -89,8 +89,10 @@ def test_non_drawer_runtime_tool_publishes_identity_schema(action_run):
     audit = json.loads(
         (config.output_dir / "m2-runtime-tool-schema.json").read_text()
     )
-    assert audit["contract"] == "M2.2-A.2"
+    assert audit["contract"] == "M2.2-A.3"
     assert audit["identity_fact_supported"] is True
+    assert audit["multi_failure_supported"] is True
+    assert audit["incremental_delivery_supported"] is True
     assert audit["tool_name"] == "retrieve_memory"
 
 
