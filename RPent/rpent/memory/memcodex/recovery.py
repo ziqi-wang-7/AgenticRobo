@@ -35,6 +35,19 @@ FAILURES = {
     "placement_not_satisfied": r"(?:placement|place|put|set).{0,45}(?:goal|predicate|target|relation).{0,25}(?:not satisfied|unmet|failed|wrong)|(?:goal|predicate).{0,35}(?:not satisfied|unmet) after (?:placement|release)",
     "contact_stalled": r"\bstall(?:ed|s|ing)?\b|no progress|(?:drawer|door).{0,35}(?:still|remain|left).{0,15}closed|(?:left|kept).{0,20}drawer.{0,10}closed|(?:missed|no).{0,15}(?:contact|engagement)",
 }
+# These specific failures may be described in narrative task-family memory
+# without structured index annotations. Permit a bounded Raw inspection, then
+# verify coverage from the hash-checked body before delivering it.
+RAW_FALLBACK_FAILURES = frozenset(
+    {
+        "wrong_spatial_relation",
+        "object_collision",
+        "grasp_space_insufficient",
+        "object_tipped",
+        "placement_not_satisfied",
+    }
+)
+
 _PHASES = {
     "wrong_drawer": {"approach", "articulate", "recovery"},
     "wrong_spatial_relation": {"transport", "release", "recovery"},
