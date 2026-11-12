@@ -24,10 +24,15 @@ from robots.libero.action_evidence import _VISUAL_ARTIFACTS
 
 FailureKind = Literal[
     "wrong_drawer",
+    "wrong_spatial_relation",
+    "object_collision",
+    "grasp_space_insufficient",
+    "object_tipped",
     "object_slipped",
     "grasp_not_closed",
     "insertion_blocked",
     "release_stuck",
+    "placement_not_satisfied",
     "contact_stalled",
 ]
 
