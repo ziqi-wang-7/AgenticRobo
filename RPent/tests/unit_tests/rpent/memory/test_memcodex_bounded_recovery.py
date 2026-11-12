@@ -299,7 +299,7 @@ def test_recovery_raw_fallback_is_not_stopped_by_unverified_action_facts(indexed
     header_data = header(result)
     assert header_data["action_preconditions_met"] is False
     assert header_data["routing_scope"] == "recovery_memory_only"
-    assert header_data["action_execution_authorized"] is False
+    assert header_data["execution_authorized"] is False
 
 
 def test_custom_exhausted_cannot_hide_known_guidance(indexed):
