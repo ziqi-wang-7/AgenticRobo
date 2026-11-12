@@ -407,6 +407,51 @@ def test_identity_rejection_is_not_promoted_to_verified(action_run):
     assert identity["source"] == "planner_agentview_identity_rejected"
 
 
+def test_multiple_failure_observations_keep_object_and_phase_attribution(action_run):
+    kit, record, config = action_run
+    record.artifacts.update({"agentview.png", "wrist.png"})
+    failures = [
+        {
+            "kind": "object_collision",
+            "object_id": "milk",
+            "phase": "transport",
+            "step": 0,
+            "artifact": "agentview.png",
+        },
+        {
+            "kind": "object_tipped",
+            "object_id": "basket",
+            "phase": "transport",
+            "step": 0,
+            "artifact": "wrist.png",
+        },
+    ]
+    kit.retrieve_memory(
+        step=0,
+        purpose="recover",
+        issue="gripper housing contacts the milk; basket leans slightly",
+        failures=failures,
+    )
+    trace = _trace(config)
+    assert trace["state"]["failure_cases"] == [
+        {
+            "failure_kind": "object_collision",
+            "failure_object": "milk",
+            "phase": "transport",
+        },
+        {
+            "failure_kind": "object_tipped",
+            "failure_object": "basket",
+            "phase": "transport",
+        },
+    ]
+    header = json.loads(trace["context"].splitlines()[1])
+    assert set(header["recovery_requirements"]) >= {
+        "object_collision",
+        "object_tipped",
+    }
+
+
 def test_tri_state_grasp_does_not_trust_pi0_boolean_alone():
     assert classify_grasp(pi0_success=False, visual_status=None) == "uncertain"
     assert classify_grasp(pi0_success=True, visual_status=None) == "uncertain"
