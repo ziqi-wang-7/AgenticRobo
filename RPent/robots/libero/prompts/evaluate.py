@@ -622,9 +622,15 @@ or reject inapplicable IDs using applicable_entries/rejected_entries at the same
 step and candidate; changed candidate parameters require fresh review. Analogies
 never replace the current task goal. Geometry IDs verify provenance, not semantic
 identity. Missing/claimed facts require observation/judgment, not repeated memory
-reads. Sufficiency is information coverage, never task success or execution
-permission. Native terminated remains the success signal. Record used IDs in
-the final audit.
+reads. During purpose=recover, continue failure-conditioned memory retrieval
+through bounded Skills/Raw fallback even when current action evidence or
+localization is missing; report those evidence gaps separately. A recovery
+retrieval STOP means only that the memory search is complete, never that the
+candidate action is authorized. Refresh geometry and verify all action
+preconditions before executing any primitive. Sufficiency is information
+coverage, never task success or execution permission. Native terminated remains
+the environment signal; audit task-goal predicates separately. Record used IDs
+in the final audit.
 """
 
 M2_MEMORY = (
