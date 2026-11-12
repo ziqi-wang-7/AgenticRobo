@@ -121,3 +121,22 @@ def motion_alert(record) -> str | None:
     ):
         return "target_not_reached"
     return None
+
+GraspStatus = Literal["verified", "uncertain", "failed"]
+
+
+def classify_grasp(
+    *,
+    pi0_success: bool | None,
+    visual_status: Literal["verified", "uncertain", "failed"] | None,
+) -> GraspStatus:
+    """Classify a grasp without treating Pi0's heuristic flag as ground truth.
+
+    A current, role-correct wrist-camera assessment is required to verify or
+    confirm failure. The Pi0 result is retained as a hint for the audit only.
+    """
+    if visual_status == "verified":
+        return "verified"
+    if visual_status == "failed":
+        return "failed"
+    return "uncertain"
