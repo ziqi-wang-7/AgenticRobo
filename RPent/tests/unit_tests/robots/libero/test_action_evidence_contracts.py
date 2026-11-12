@@ -432,6 +432,8 @@ def test_action_evidence_flag_requires_m2_and_changes_only_opted_in_prompt(
     assert "target_object" in prompts[True]
     assert "Bind each required object" not in prompts[True]
     assert "empty-gripper approach to the already" in prompts[True]
+    assert "Execute one corrective primitive at a time" in prompts[True]
+    assert "A recovery is complete only when" in prompts[True]
     assert "localize EVERYTHING first" not in prompts[True]
 
 
