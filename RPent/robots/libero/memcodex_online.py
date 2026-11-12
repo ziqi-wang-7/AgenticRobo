@@ -709,6 +709,8 @@ class M2LiberoToolkit(LiberoToolkit):
                     "cache_hit": True,
                     "repeated_query": True,
                     "new_review_decisions": 0,
+                    "review_no_progress": True,
+                    "review_limit_reached": True,
                     "incremental_delivery": {
                         "requested_delivered_ids": cached_info.get("already_delivered_ids", []),
                         "new_memory_ids": [],
