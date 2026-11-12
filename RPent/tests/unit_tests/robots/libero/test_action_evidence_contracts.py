@@ -169,7 +169,7 @@ def test_geometry_does_not_verify_held_object_or_identity(action_run):
         "key": "holding:milk",
         "status": "claimed",
         "evidence_ref": "0:wrist.png",
-        "source": "planner_visual_claim",
+        "source": "planner_wrist_grasp_assessment",
     }
 
 
