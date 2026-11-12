@@ -26,6 +26,7 @@ from robots.libero.memcodex_online import prepare_indexed_memory
 from robots.libero.robot_spec import get_robot_spec
 from robots.libero.tools import LiberoPrimitives, view_env_state
 from rpent.robots.robot_spec import RunConfig
+from robots.libero.recovery_evidence import classify_grasp
 from tests.unit_tests.rpent.memory import test_memcodex_m2_contracts as m2
 
 indexed = m2.indexed
@@ -153,7 +154,7 @@ def test_geometry_does_not_verify_held_object_or_identity(action_run):
     )
     with_claim = _trace(config)
     assert not response.images
-    assert with_claim["routing_decision"] == "REVIEW"
+    assert with_claim["routing_decision"] == "OBSERVE"
     assert not with_claim["action_preconditions_met"]
     assert with_claim["action_missing_facts"] == []
     assert set(with_claim["action_unverified_facts"]) == {
@@ -244,7 +245,7 @@ def test_release_requires_correct_holding_and_placement_claims(action_run):
         visual_checks=[holding, placement],
     )
     review = _trace(config)
-    assert review["routing_decision"] == "REVIEW"
+    assert review["routing_decision"] == "OBSERVE"
     assert not review["action_preconditions_met"]
     assert not review["action_missing_facts"]
     assert {
@@ -256,6 +257,105 @@ def test_release_requires_correct_holding_and_placement_claims(action_run):
         "holding:milk": "0:wrist.png",
         "placement_ready:basket": "0:agentview.png",
     }
+
+
+def test_identity_requires_current_agentview_attestation(action_run):
+    kit, record, config = action_run
+    record.artifacts.add("agentview_high.png")
+    evidence = m2.localize(kit)
+    candidate = _pick()
+    uncertain = {
+        "fact": "identity",
+        "object_id": "milk",
+        "value": "milk",
+        "status": "uncertain",
+        "step": 0,
+        "artifact": "agentview_high.png",
+    }
+    kit.retrieve_memory(
+        step=0,
+        candidate=candidate,
+        localizations={"milk": evidence},
+        visual_checks=[uncertain],
+    )
+    assert _trace(config)["action_unverified_facts"] == ["identity:milk"]
+
+    verified = {**uncertain, "status": "verified"}
+    kit.retrieve_memory(
+        step=0,
+        candidate=candidate,
+        localizations={"milk": evidence},
+        visual_checks=[verified],
+    )
+    trace = _trace(config)
+    assert trace["action_preconditions_met"]
+    identity = next(
+        fact for fact in trace["action_query"]["facts"]
+        if fact["key"] == "identity:milk"
+    )
+    assert identity["status"] == "verified"
+    assert identity["source"] == "planner_agentview_identity_attestation"
+
+
+def test_identity_rejection_is_not_promoted_to_verified(action_run):
+    kit, record, config = action_run
+    record.artifacts.add("agentview.png")
+    evidence = m2.localize(kit)
+    rejected = {
+        "fact": "identity",
+        "object_id": "milk",
+        "value": "butter",
+        "status": "rejected",
+        "step": 0,
+        "artifact": "agentview.png",
+    }
+    kit.retrieve_memory(
+        step=0,
+        candidate=_pick(),
+        localizations={"milk": evidence},
+        visual_checks=[rejected],
+    )
+    trace = _trace(config)
+    assert not trace["action_preconditions_met"]
+    identity = next(
+        fact for fact in trace["action_query"]["facts"]
+        if fact["key"] == "identity:milk"
+    )
+    assert identity["status"] == "claimed"
+    assert identity["source"] == "planner_agentview_identity_rejected"
+
+
+def test_tri_state_grasp_does_not_trust_pi0_boolean_alone():
+    assert classify_grasp(pi0_success=False, visual_status=None) == "uncertain"
+    assert classify_grasp(pi0_success=True, visual_status=None) == "uncertain"
+    assert classify_grasp(pi0_success=False, visual_status="verified") == "verified"
+    assert classify_grasp(pi0_success=True, visual_status="failed") == "failed"
+    assert classify_grasp(pi0_success=False, visual_status="uncertain") == "uncertain"
+
+
+def test_confirmed_failed_grasp_requests_recovery(action_run):
+    kit, record, config = action_run
+    record.command = {"action": "pi0_pick"}
+    record.result = {"success": False}
+    record.artifacts.add("wrist.png")
+    localizations = {"milk": m2.localize(kit), "basket": m2.localize(kit)}
+    failed_check = {
+        "fact": "holding",
+        "object_id": "milk",
+        "step": 0,
+        "artifact": "wrist.png",
+        "status": "failed",
+    }
+    kit.retrieve_memory(
+        step=0,
+        candidate=_carry(gripper=1.0),
+        localizations=localizations,
+        visual_checks=[failed_check],
+    )
+    trace = _trace(config)
+    assert trace["grasp_status"] == "failed"
+    assert trace["last_action_failed"]
+    assert trace["state"]["needs_recovery"]
 
 
 def test_memory_review_is_scoped_to_normalized_candidate(action_run):
