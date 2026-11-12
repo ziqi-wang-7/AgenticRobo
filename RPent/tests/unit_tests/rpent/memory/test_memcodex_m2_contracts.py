@@ -26,9 +26,11 @@ from repro.memcodex_corpus import build, encoded
 from robots.libero.memcodex_online import (
     IndexedMemoryManager,
     M2LiberoToolkit,
+    _reviewable_memory_ids,
     make_controller,
     prepare_indexed_memory,
 )
+from rpent.memory.memcodex.policy import RoutingContext, manual_route
 from rpent.robots.robot_spec import RunConfig
 from rpent.session.base import StepRecord
 from rpent.tools.base import ToolResult, tool
@@ -289,6 +291,73 @@ def test_m2_prompt_and_access_boundaries(online):
         for method in (kit.memory.authorize_read, kit.memory.authorize_write):
             with pytest.raises(PermissionError):
                 method(config.output_dir / name)
+
+
+def test_overview_memory_ids_are_reviewable_only_within_same_step():
+    seen = {
+        (0, ""): {"summary:task", "skills:grasp"},
+        (0, "candidate-A"): {"skills:grasp", "skills:place"},
+        (0, "candidate-B"): {"skills:drawer"},
+        (1, ""): {"summary:next-step"},
+    }
+
+    assert _reviewable_memory_ids(seen, 0, "candidate-A") == {
+        "summary:task",
+        "skills:grasp",
+        "skills:place",
+    }
+    assert _reviewable_memory_ids(seen, 0, "candidate-B") == {
+        "summary:task",
+        "skills:drawer",
+    }
+    assert _reviewable_memory_ids(seen, 1, "candidate-A") == {
+        "summary:next-step",
+    }
+
+
+def test_unverified_action_facts_request_observation_not_memory_review():
+    context = RoutingContext(
+        layer="skills",
+        query=None,
+        memory_missing=(),
+        action_missing_facts=(),
+        action_unverified_facts=("identity:white_mug",),
+        review_entries=(),
+        selected_ids=("skills:grasp",),
+        recovery=False,
+    )
+
+    assert manual_route(context).action == "OBSERVE"
+
+
+def test_missing_action_facts_request_observation():
+    context = RoutingContext(
+        layer="skills",
+        query=None,
+        memory_missing=(),
+        action_missing_facts=("holding:white_mug",),
+        action_unverified_facts=(),
+        review_entries=(),
+        selected_ids=("skills:place",),
+        recovery=False,
+    )
+
+    assert manual_route(context).action == "OBSERVE"
+
+
+def test_memory_applicability_review_remains_review():
+    context = RoutingContext(
+        layer="skills",
+        query=None,
+        memory_missing=(),
+        action_missing_facts=(),
+        action_unverified_facts=(),
+        review_entries=("skills:analogy",),
+        selected_ids=("skills:analogy",),
+        recovery=False,
+    )
+
+    assert manual_route(context).action == "REVIEW"
 
 
 def test_task_requirements_keep_distinct_targets():
