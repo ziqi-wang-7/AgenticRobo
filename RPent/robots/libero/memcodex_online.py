@@ -489,7 +489,11 @@ class M2LiberoToolkit(LiberoToolkit):
                     {
                         "purpose": purpose,
                         "issue": " ".join(issue.casefold().split()),
-                        "failure": failure.model_dump() if failure else None,
+                        "failure": (
+                            failure.model_dump()
+                            if isinstance(failure, FailureObservation)
+                            else failure
+                        ),
                         "failures": [
                             item.model_dump() if isinstance(item, FailureObservation) else item
                             for item in (failures or ())
