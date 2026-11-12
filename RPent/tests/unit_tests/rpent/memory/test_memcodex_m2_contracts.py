@@ -351,7 +351,7 @@ def test_memory_applicability_review_remains_review():
     context = RoutingContext(
         layer="skills",
         query=None,
-        memory_missing=(),
+        memory_missing=("applicable_memory",),
         action_missing_facts=(),
         action_unverified_facts=(),
         review_entries=("skills:analogy",),
