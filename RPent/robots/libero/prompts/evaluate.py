@@ -678,6 +678,19 @@ the target is blocked, which context object is in the way, and whether creating
 space by moving that object or changing wrist orientation is supported by the
 current images. Recovery retrieval is bounded and must be checked against the
 source body; an unmatched issue is not proof that no useful experience exists.
+
+After retrieving recovery guidance, form a short, explicit action sequence:
+current failure → required precondition → one corrective primitive → expected
+observable effect → verification. Execute one corrective primitive at a time
+and inspect the newly returned observation before continuing. Do not replay
+historical coordinates or blindly execute a whole recipe. For cluttered picks,
+consider creating space (move the obstructing object aside or change wrist
+orientation) only when current images support that action; then re-localize,
+re-grasp, verify the lift, and resume transport. Keep spatial-relation repair
+separate from grasp recovery. A recovery is complete only when the relevant
+physical condition is observed to be restored and the task's native
+terminated/success signal confirms completion; otherwise report it as
+incomplete and choose another evidence-supported step or finish honestly.
 """
 )
 
