@@ -23,7 +23,12 @@ from typing import TYPE_CHECKING, Any
 
 from rpent.memory.memcodex.hierarchy import LAYERS
 from rpent.memory.memcodex.policy import RoutingContext, RoutingDecision, manual_route
-from rpent.memory.memcodex.recovery import covers, recovery_cases, requirements
+from rpent.memory.memcodex.recovery import (
+    RAW_FALLBACK_FAILURES,
+    covers,
+    recovery_cases,
+    requirements,
+)
 
 if TYPE_CHECKING:
     from rpent.memory.memcodex.controller import MemCodexController, RetrievalResult
@@ -290,14 +295,20 @@ def retrieve_indexed(
         else []
     )
     for kind in required_recovery:
-        if (
-            recovery_candidates
-            and all("recovery_cases" in m for m in recovery_candidates)
-            and not any(
-                covers(case, kind, state)
-                for m in recovery_candidates
-                for case in m["recovery_cases"]
-            )
+        has_indexed_case = any(
+            covers(case, kind, state)
+            for m in recovery_candidates
+            for case in m.get("recovery_cases", ())
+        )
+        if has_indexed_case:
+            continue
+        # Spatial/clutter failures may be described in narrative Raw memory
+        # without structured index annotations. Defer exhaustion until a
+        # bounded Raw pass has checked the hash-verified source body.
+        if kind in RAW_FALLBACK_FAILURES:
+            continue
+        if recovery_candidates and all(
+            "recovery_cases" in m for m in recovery_candidates
         ):
             unavailable.add(f"recovery_case:{kind}")
         elif not recovery_candidates:
@@ -336,10 +347,14 @@ def retrieve_indexed(
             and searchable_missing(kept)
             and all(m.startswith("recovery_case:") for m in searchable_missing(kept))
         ):
+            allow_narrative_fallback = bool(
+                set(required_recovery) & RAW_FALLBACK_FAILURES
+            )
             eligible = [
                 m
                 for m in eligible
                 if "recovery_cases" not in m
+                or allow_narrative_fallback
                 or any(
                     covers(case, kind, state)
                     for kind in required_recovery
@@ -412,17 +427,27 @@ def retrieve_indexed(
                 if not searchable_missing(kept):
                     break
         missing = assess(kept)
-        if searchable_missing(kept) and layer_reads >= read_cap:
-            unread = [m["key"] for m in eligible if m["path"] not in seen_paths]
-            if unread:
-                routing_steps.append(
-                    {
-                        "action": "LIMIT",
-                        "layer": layer,
-                        "reason": "per_layer_read_cap",
-                        "candidate_ids": unread,
-                    }
-                )
+        unread = [m["key"] for m in eligible if m["path"] not in seen_paths]
+        if layer == "raw" and required_recovery and not unread:
+            # Exhaust only after bounded Raw candidates have been checked.
+            # Coverage is derived from each hash-checked body, never metadata alone.
+            for kind in required_recovery:
+                if not any(
+                    covers(case, kind, state)
+                    for metadata, _ in kept
+                    for case in metadata.get("recovery_cases", ())
+                ):
+                    unavailable.add(f"recovery_case:{kind}")
+            missing = assess(kept)
+        if searchable_missing(kept) and layer_reads >= read_cap and unread:
+            routing_steps.append(
+                {
+                    "action": "LIMIT",
+                    "layer": layer,
+                    "reason": "per_layer_read_cap",
+                    "candidate_ids": unread,
+                }
+            )
         narrow_ids: tuple[str, ...] = ()
         narrow_reason = ""
         next_layer = None
