@@ -83,18 +83,8 @@ def _carry(**args):
 def test_non_drawer_runtime_tool_publishes_identity_schema(action_run):
     kit, _, _ = action_run
     declaration = kit._tools["retrieve_memory"]
+    assert declaration.name == "retrieve_memory"
     validate_identity_tool_schema(declaration)
-
-    schema = declaration.input_schema
-    visual = schema["properties"]["visual_checks"]
-    item = visual["items"]
-    if "$ref" in item:
-        ref = item["$ref"]
-        for component in ref[2:].split("/"):
-            item = schema[component] if component.startswith("$defs") else item
-        item = schema["$defs"][ref.split("/")[-1]]
-    assert "identity" in item["properties"]["fact"]["enum"]
-    assert {"value", "status"} <= set(item["properties"])
 
 
 def test_runtime_schema_validation_rejects_stale_legacy_wrapper(action_run):
