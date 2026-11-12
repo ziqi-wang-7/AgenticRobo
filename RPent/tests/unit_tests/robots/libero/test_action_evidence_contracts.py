@@ -85,6 +85,12 @@ def test_non_drawer_runtime_tool_publishes_identity_schema(action_run):
     declaration = kit._tools["retrieve_memory"]
     assert declaration.name == "retrieve_memory"
     validate_identity_tool_schema(declaration)
+    audit = json.loads(
+        (config.output_dir / "m2-runtime-tool-schema.json").read_text()
+    )
+    assert audit["contract"] == "M2.2-A.2"
+    assert audit["identity_fact_supported"] is True
+    assert audit["tool_name"] == "retrieve_memory"
 
 
 def test_runtime_schema_validation_rejects_stale_legacy_wrapper(action_run):
