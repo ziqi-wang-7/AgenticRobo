@@ -562,6 +562,8 @@ def test_repeated_memory_review_is_idempotent_within_failure_scope(action_run):
     assert header["review_entries"] == []
     assert repeated["reviewed_entry_count"] == len(selected)
     assert repeated["new_review_decisions"] == 0
+    assert repeated["review_no_progress"] is True
+    assert repeated["review_limit_reached"] is True
     assert repeated["cache_hit"] is True
 
 
@@ -589,7 +591,7 @@ def test_review_limit_stops_further_review_for_same_failure_scope(action_run):
     ).hexdigest()
     kit._review_decisions[(0, fingerprint, signature)] = {
         f"skills:already-reviewed-{index}": "applicable"
-        for index in range(16)
+        for index in range(4)
     }
     kit.retrieve_memory(
         step=0, candidate=_pick(), localizations=localizations
@@ -598,7 +600,7 @@ def test_review_limit_stops_further_review_for_same_failure_scope(action_run):
     header = json.loads(trace["context"].splitlines()[1])
     assert header["review_limit_reached"] is True
     assert header["review_entries"] == []
-    assert trace["review_limit"] == 16
+    assert trace["review_limit"] == 4
 
 
 def test_identical_retrieval_query_uses_compact_cached_receipt(action_run):
