@@ -18,7 +18,13 @@ import json
 
 import pytest
 
-from rpent.memory.memcodex.recovery import covers, recovery_cases
+from rpent.memory.memcodex.recovery import (
+    covers,
+    failure_kinds,
+    object_types,
+    recovery_cases,
+    requirements,
+)
 from tests.unit_tests.rpent.memory import test_memcodex_m2_contracts as m2
 from tests.unit_tests.rpent.memory.test_memcodex_descent_contracts import add_entry
 
@@ -77,6 +83,52 @@ def test_specific_raw_remedy_is_delivered(indexed):
     assert wanted in result.selected_ids
     assert result.memory_read_complete
     assert result.layers_visited[-1] == "raw"
+
+
+@pytest.mark.parametrize(
+    ("issue", "expected"),
+    [
+        ("right-side relation unmet", ("wrong_spatial_relation",)),
+        ("the pudding box collided with the mug", ("object_collision",)),
+        ("not enough grasp space around the pudding box", ("grasp_space_insufficient",)),
+        ("the cup remained tilted", ("object_tipped",)),
+        ("placement goal not satisfied after release", ("placement_not_satisfied",)),
+    ],
+)
+def test_t6_failure_language_maps_to_structured_recovery(issue, expected):
+    assert failure_kinds(issue) == list(expected)
+    assert requirements({"issue": issue}) == expected
+
+
+def test_spatial_recovery_case_extracts_push_rotate_and_relocalize_remedy():
+    text = (
+        "Right-side relation unmet for the chocolate pudding box. "
+        "Push the pudding box aside, rotate the wrist, create more space, "
+        "re-localize and retry the grasp."
+    )
+    cases = recovery_cases(text)
+    assert any(case["kind"] == "wrong_spatial_relation" for case in cases)
+    assert any(case["kind"] == "grasp_space_insufficient" for case in cases)
+    assert "pudding_box" in object_types(text)
+    assert any(
+        covers(
+            case,
+            "wrong_spatial_relation",
+            {"failure_object": "chocolate_pudding", "phase": "recovery"},
+        )
+        for case in cases
+    )
+
+
+def test_collision_and_tipped_recovery_cases_are_not_generic_grasp_cases():
+    text = (
+        "The pudding box collided with the mug and the cup remained tilted. "
+        "Move the mug aside, re-localize the box, rotate the wrist and retry."
+    )
+    kinds = {case["kind"] for case in recovery_cases(text)}
+    assert "object_collision" in kinds
+    assert "object_tipped" in kinds
+    assert "grasp_not_closed" not in kinds
 
 
 def test_recovery_cannot_cross_explicit_object_or_phase():
