@@ -712,11 +712,17 @@ After retrieving recovery guidance, form a short, explicit action sequence:
 current failure → required precondition → one corrective primitive → expected
 observable effect → verification. Execute one corrective primitive at a time
 and inspect the newly returned observation before continuing. Do not replay
-historical coordinates or blindly execute a whole recipe. For cluttered picks,
-consider creating space (move the obstructing object aside or change wrist
-orientation) only when current images support that action; then re-localize,
-re-grasp, verify the lift, and resume transport. Keep spatial-relation repair
-separate from grasp recovery. A recovery is complete only when the relevant
+historical coordinates or blindly execute a whole recipe.
+
+For wrong_spatial_relation or placement_not_satisfied, first inspect whether
+the object can be safely repositioned from its current pose without a new
+grasp. Before choosing re-grasp, inspect the full swept path, nearby completed
+objects, wrist/housing clearance, and whether a retreat would disturb them.
+Prefer direct pose correction only when current geometry and the primitive
+contract support it. Otherwise create clearance or reorient the wrist only
+when current images support that action; then re-localize, re-grasp, verify the
+lift, and resume transport. Keep spatial-relation repair separate from grasp
+recovery. Never infer a safe path from a historical recipe alone. A recovery is complete only when the relevant
 physical condition is observed to be restored and the task's native
 terminated/success signal confirms completion; otherwise report it as
 incomplete and choose another evidence-supported step or finish honestly.
