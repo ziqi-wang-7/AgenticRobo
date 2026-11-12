@@ -90,6 +90,22 @@ def _resolve_schema_ref(root: dict[str, Any], node: dict[str, Any]) -> dict[str,
     return resolved
 
 
+def _visual_check_item_schema(
+    root: dict[str, Any], node: dict[str, Any]
+) -> dict[str, Any] | None:
+    """Find array item schema through nullable/union wrappers and local refs."""
+    node = _resolve_schema_ref(root, node)
+    if isinstance(node.get("items"), dict):
+        return _resolve_schema_ref(root, node["items"])
+    for key in ("anyOf", "oneOf", "allOf"):
+        for option in node.get(key, ()):
+            if isinstance(option, dict):
+                found = _visual_check_item_schema(root, option)
+                if found is not None:
+                    return found
+    return None
+
+
 def validate_identity_tool_schema(declaration: Any) -> None:
     """Fail fast unless both runtime validation and published schema expose identity checks."""
     schemas = {
@@ -102,17 +118,15 @@ def validate_identity_tool_schema(declaration: Any) -> None:
             raise RuntimeError(
                 f"M2.2 requires visual_checks in the {label} retrieve_memory schema"
             )
-        items = visual.get("items")
-        if not isinstance(items, dict):
+        item_schema = _visual_check_item_schema(root, visual)
+        if item_schema is None:
             raise RuntimeError(
                 f"M2.2 requires array item schema for visual_checks in the {label}"
             )
-        item_schema = _resolve_schema_ref(root, items)
         properties = item_schema.get("properties", {})
         fact_schema = properties.get("fact", {})
         facts = set(fact_schema.get("enum", ()))
-        missing = {"identity"} - facts
-        if missing or not {"value", "status"} <= set(properties):
+        if "identity" not in facts or not {"value", "status"} <= set(properties):
             raise RuntimeError(
                 "M2.2 runtime tool schema is stale: visual_checks must expose "
                 "fact=identity plus value and status; restart the LIBERO/MCP server "
