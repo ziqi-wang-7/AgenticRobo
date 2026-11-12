@@ -110,10 +110,11 @@ def manual_route(context: RoutingContext) -> RoutingDecision:
     if context.memory_missing and not context.searchable_missing:
         return RoutingDecision("EXHAUSTED")
     if context.memory_read_complete or context.layer == "raw":
-        if context.action_missing_facts:
+        # Missing or unverified action facts are perception/state gaps, not
+        # memory-applicability questions. Re-reading the same memory cannot
+        # resolve them; request fresh observation instead of looping REVIEW.
+        if context.action_missing_facts or context.action_unverified_facts:
             return RoutingDecision("OBSERVE")
-        if context.action_unverified_facts:
-            return RoutingDecision("REVIEW")
         if context.memory_read_complete:
             return RoutingDecision("STOP")
     unresolved_case = any(
