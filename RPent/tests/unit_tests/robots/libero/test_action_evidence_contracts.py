@@ -640,6 +640,8 @@ def test_incremental_memory_delivery_omits_only_explicitly_retained_bodies(actio
     assert set(header["already_delivered_ids"]) == set(selected)
     assert header["new_memory_ids"] == []
     assert header["new_memory_tokens"] == 0
+    assert incremental["incremental_delivery"]["new_memory_tokens"] == 0
+    assert set(incremental["incremental_delivery"]["already_delivered_ids"]) == set(selected)
     assert "[MEMORY BODY OMITTED:" in response.data["memory_context"]
     assert response.data["memory_context"] != full_context
 
