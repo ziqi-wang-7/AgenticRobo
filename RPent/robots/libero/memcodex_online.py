@@ -50,6 +50,9 @@ from rpent.tools.base import ToolResult, tool
 from rpent.utils.config import get_repo_root
 
 
+MAX_REVIEWED_ENTRIES_PER_FAILURE = 16
+
+
 def make_controller(record: dict) -> MemCodexController:
     """Count the actual serialized memory response, including its JSON envelope."""
     import tiktoken
@@ -524,6 +527,9 @@ class M2LiberoToolkit(LiberoToolkit):
                 entry_id for entry_id, decision in previous_decisions.items()
                 if decision == "rejected"
             )
+            review_limit_reached = (
+                len(previous_decisions) >= MAX_REVIEWED_ENTRIES_PER_FAILURE
+            )
             delivered = set()
             if not force_full_delivery:
                 delivered = set(delivered_entries or [])
@@ -646,6 +652,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 "applicable_entries": sorted(confirmed),
                 "delivered_entries": sorted(delivered),
                 "force_full_delivery": force_full_delivery,
+                "review_limit_reached": review_limit_reached,
                 **failure_state,
             }
             if rejected:
@@ -727,6 +734,8 @@ class M2LiberoToolkit(LiberoToolkit):
                 "review_decision_scope": failure_signature,
                 "review_decisions": dict(previous_decisions),
                 "reviewed_entry_count": len(previous_decisions),
+                "review_limit": MAX_REVIEWED_ENTRIES_PER_FAILURE,
+                "review_limit_reached": review_limit_reached,
                 "new_review_decisions": len(new_review_ids),
                 "incremental_delivery": {
                     "requested_delivered_ids": sorted(delivered),
