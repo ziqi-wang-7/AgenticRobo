@@ -356,6 +356,8 @@ def test_confirmed_failed_grasp_requests_recovery(action_run):
     assert trace["grasp_status"] == "failed"
     assert trace["last_action_failed"]
     assert trace["state"]["needs_recovery"]
+    assert trace["state"]["failure_kind"] == "grasp_not_closed"
+    assert trace["state"]["failure_object"] == "milk"
 
 
 def test_memory_review_is_scoped_to_normalized_candidate(action_run):
