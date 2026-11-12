@@ -267,7 +267,7 @@ def test_online_requires_real_current_evidence_and_tracks_provenance(online):
     assert localize(kit, xyz=(float("nan"), 2, 3)) is None
 
 
-def test_online_failed_grasp_requests_recovery_without_extra_llm(online):
+def test_pi0_false_without_visual_confirmation_is_uncertain_not_recovery(online):
     kit, record, config = online
     record.command = {"action": "pi0_pick"}
     record.result = {"success": False}
@@ -275,7 +275,9 @@ def test_online_failed_grasp_requests_recovery_without_extra_llm(online):
         step=0, localizations={"milk": localize(kit), "basket": localize(kit)}
     )
     trace = json.loads((config.output_dir / "m2-retrievals.jsonl").read_text())
-    assert trace["state"]["needs_recovery"] and trace["last_action_failed"]
+    assert trace["grasp_status"] == "uncertain"
+    assert not trace["state"]["needs_recovery"]
+    assert not trace["last_action_failed"]
     assert trace["sufficient"]
 
 
