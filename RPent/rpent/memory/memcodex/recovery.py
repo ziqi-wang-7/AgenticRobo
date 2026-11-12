@@ -27,7 +27,7 @@ FAILURES = {
     "wrong_spatial_relation": r"(?:wrong|incorrect|unmet|unsatisfied|not satisfied).{0,45}(?:left|right|side|spatial|relation|placement)|(?:left|right)[ -]side.{0,35}(?:relation|placement).{0,25}(?:unmet|wrong|incorrect|not satisfied)|(?:relation|placement).{0,35}(?:wrong side|wrong direction|not satisfied|unmet)|placed? on the wrong side|spatial placement correction|placement correction.{0,30}(?:right|left|side)",
     "object_collision": r"\bcollision\b|collid(?:e|ed|ing|es)|bump(?:ed|ing)? into|hit (?:the )?(?:cup|mug|object|obstacle)|brush(?:ed|ing)? (?:against|into|past|the) (?:gripper|housing|cup|mug|object)",
     "grasp_space_insufficient": r"(?:not enough|insufficient|limited|no).{0,35}(?:grasp|gripping|pickup) space|(?:grasp|gripping|pickup) space.{0,35}(?:insufficient|blocked|too small)|no room to (?:grasp|pick)|obstructed grasp",
-    "object_tipped": r"\btipp?ed\b|\btilt(?:ed|ing)?\b|lean(?:s|ed|ing)? over|fell over|toppl(?:ed|ing)",
+    "object_tipped": r"\btipp?ed\b|\btilt(?:ed|ing)?\b|lean(?:s|ed|ing)?(?:\s+(?:slightly|a little|over|to one side))?|fell over|toppl(?:ed|ing)",
     "object_slipped": r"\bslip(?:s|ped|ping)?\b|\bdrop(?:ped|ping)?\b|lost (?:the )?(?:grasp|grip|mug|pot|object)",
     "grasp_not_closed": r"(?:finger|gripper)s?.{0,30}(?:stay|remain|still|left).{0,15}open|no clos|does not close|did not close|no lift|without (?:closing|closure)|open.finger",
     "insertion_blocked": r"(?:insert|insertion|cavity|mouth).{0,60}(?:stall|block|obstruct|jam)|(?:stall|block|obstruct|jam).{0,60}(?:insert|insertion|cavity|mouth)",
@@ -90,6 +90,9 @@ def object_types(text: str) -> set[str]:
             "pudding_box": r"pudding(?:[ _-]*box)?|chocolate_pudding",
             "cup": r"\bcup\b|_cup\b",
             "plate": r"\bplate\b|_plate\b",
+            "pudding_box": r"pudding(?:[ _-]*box)?|chocolate_pudding",
+            "gripper": r"gripper|wrist housing|robot hand",
+
         }.items()
         if re.search(pattern, text, re.I)
     }
@@ -133,24 +136,40 @@ def recovery_cases(text: str) -> list[dict]:
 
 
 def requirements(state: dict) -> tuple[str, ...]:
-    """Combine an explicit failure with additional independently described issues."""
+    """Combine explicit, independently attributed failures and issue text."""
     explicit = state.get("failure_kind")
     if explicit and explicit not in FAILURES:
         raise ValueError(f"Unknown recovery failure kind: {explicit}")
-    issue = str(state.get("issue", "")).strip()
-    inferred = set(failure_kinds(issue))
+    cases = state.get("failure_cases", ())
+    inferred = set(failure_kinds(str(state.get("issue", "")).strip()))
     if explicit:
         inferred.add(explicit)
+    for item in cases:
+        kind = item.get("failure_kind")
+        if kind not in FAILURES:
+            raise ValueError(f"Unknown recovery failure kind: {kind}")
+        inferred.add(kind)
     return tuple(sorted(inferred))
+
+
+def _failure_context(state: dict, kind: str) -> dict:
+    """Return the object/phase attribution for one failure kind."""
+    for item in state.get("failure_cases", ()):
+        if item.get("failure_kind") == kind:
+            return item
+    if state.get("failure_kind") == kind or not state.get("failure_cases"):
+        return state
+    return {}
 
 
 def covers(case: dict, kind: str, state: dict) -> bool:
     """Check historical problem, object scope and phase without asserting facts."""
     if case["kind"] != kind:
         return False
-    current = object_types(str(state.get("failure_object", "")))
+    context = _failure_context(state, kind)
+    current = object_types(str(context.get("failure_object", "")))
     scope = set(case["object_types"])
-    phase = state.get("phase")
+    phase = context.get("phase")
     return (not current or not scope or bool(current & scope)) and (
         not phase or not case["phases"] or phase in case["phases"]
     )
