@@ -23,7 +23,7 @@ class ActionFact:
     """One current-step fact or planner claim with its evidence provenance."""
 
     key: str
-    status: Literal["verified", "claimed"]
+    status: Literal["verified", "claimed", "rejected"]
     evidence_ref: str
     source: str
 
