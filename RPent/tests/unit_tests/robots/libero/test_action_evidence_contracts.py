@@ -480,6 +480,80 @@ def test_memory_review_is_scoped_to_normalized_candidate(action_run):
         )
 
 
+def test_repeated_memory_review_is_idempotent_within_failure_scope(action_run):
+    kit, _, config = action_run
+    indexed_corpus = kit.memory.controller.indexed
+    for item in indexed_corpus.profile(m2.TASK)["layers"]["skills"]:
+        indexed_corpus.index["entries"][item["path"]]["review_required"] = True
+    localizations = {"milk": m2.localize(kit)}
+    kit.retrieve_memory(step=0, candidate=_pick(), localizations=localizations)
+    first = _trace(config)
+    selected = [
+        entry for entry in first["selected_ids"] if entry.startswith("skills:")
+    ]
+    assert selected
+
+    kit.retrieve_memory(
+        step=0,
+        candidate=_pick(),
+        localizations=localizations,
+        applicable_entries=selected,
+    )
+    reviewed = _trace(config)
+    assert reviewed["review_decisions"]
+    assert reviewed["reviewed_entry_count"] == len(selected)
+
+    kit.retrieve_memory(
+        step=0,
+        candidate=_pick(),
+        localizations=localizations,
+        applicable_entries=selected,
+    )
+    repeated = _trace(config)
+    header = json.loads(repeated["context"].splitlines()[1])
+    assert header["review_entries"] == []
+    assert repeated["reviewed_entry_count"] == len(selected)
+    assert repeated["new_review_decisions"] == len(selected)
+
+
+def test_incremental_memory_delivery_omits_only_explicitly_retained_bodies(action_run):
+    kit, _, config = action_run
+    localizations = {"milk": m2.localize(kit)}
+    kit.retrieve_memory(
+        step=0, candidate=_pick(), localizations=localizations
+    )
+    first = _trace(config)
+    selected = first["selected_ids"]
+    assert selected
+    full_context = first["context"]
+
+    response = kit.retrieve_memory(
+        step=0,
+        candidate=_pick(),
+        localizations=localizations,
+        delivered_entries=selected,
+    )
+    incremental = _trace(config)
+    header = json.loads(response.data["memory_context"].splitlines()[1])
+    assert set(header["already_delivered_ids"]) == set(selected)
+    assert header["new_memory_ids"] == []
+    assert header["new_memory_tokens"] == 0
+    assert "[MEMORY BODY OMITTED:" in response.data["memory_context"]
+    assert response.data["memory_context"] != full_context
+
+    full = kit.retrieve_memory(
+        step=0,
+        candidate=_pick(),
+        localizations=localizations,
+        delivered_entries=selected,
+        force_full_delivery=True,
+    )
+    full_header = json.loads(full.data["memory_context"].splitlines()[1])
+    assert set(full_header["new_memory_ids"]) == set(selected)
+    assert full_header["already_delivered_ids"] == []
+    assert "[MEMORY BODY OMITTED:" not in full.data["memory_context"]
+
+
 def test_action_evidence_flag_requires_m2_and_changes_only_opted_in_prompt(
     indexed, tmp_path
 ):
