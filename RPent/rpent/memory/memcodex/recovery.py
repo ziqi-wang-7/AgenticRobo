@@ -115,7 +115,6 @@ def recovery_cases(text: str) -> list[dict]:
             if passage.lstrip().startswith("|")
             else []
         )
-        symptom = columns[0] if len(columns) >= 3 else passage
         response = columns[-1] if len(columns) >= 3 else passage
         if not re.search(
             r"re-?locali[sz]|retry|re-?grasp|re-?pick|adjust|retreat|withdraw|re-?clamp|explicit.{0,15}clos|close the|reopen|switch|reverse|tilt|preposition|reposition|lower|stop|check|inspect|verify|push|move aside|clear (?:the )?(?:obstacle|space|object)|create (?:more )?space|make room|rotate|yaw|change orientation|realign|correct (?:the )?(?:side|position)",
@@ -123,14 +122,24 @@ def recovery_cases(text: str) -> list[dict]:
             re.I,
         ):
             continue
-        for kind in failure_kinds(symptom):
-            case = {
-                "kind": kind,
-                "object_types": sorted(object_types(symptom)),
-                "phases": sorted(_PHASES[kind]),
-            }
-            if case not in cases:
-                cases.append(case)
+        if len(columns) >= 3:
+            symptom_sentences = [columns[0]]
+        else:
+            # Attribute each cause to the sentence that describes its symptom,
+            # not every object mentioned in the whole recovery paragraph.
+            symptom_sentences = re.split(r"(?<=[.!?])\\s+", passage)
+            symptom_sentences = [
+                sentence for sentence in symptom_sentences if failure_kinds(sentence)
+            ] or [passage]
+        for symptom in symptom_sentences:
+            for kind in failure_kinds(symptom):
+                case = {
+                    "kind": kind,
+                    "object_types": sorted(object_types(symptom)),
+                    "phases": sorted(_PHASES[kind]),
+                }
+                if case not in cases:
+                    cases.append(case)
     return sorted(cases, key=lambda x: (x["kind"], x["object_types"], x["phases"]))
 
 
