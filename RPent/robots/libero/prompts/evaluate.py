@@ -665,6 +665,11 @@ promote geometry alone or a repeated planner assertion to verified identity.
 For transport/release, visual_checks may attribute holding (held_object) or
 placement_ready (destination) to a saved current camera image. Holding checks
 must use wrist.png/wrist_high.png and status=verified, uncertain or failed.
+Placement readiness must use agentview.png/agentview_high.png. Set
+status=verified and value=true only when the current image supports a clear,
+reachable, collision-free placement approach; use uncertain when ambiguous and
+failed when the placement approach is visibly blocked. This is a pre-release
+readiness fact, not proof that the final BDDL placement predicate is satisfied.
 A verified grasp requires the object to follow a short lift and remain in the
 gripper; finger gap and pi0_pick.success alone are insufficient. If evidence is
 uncertain, observe again; if failure is visually confirmed, report status=failed
