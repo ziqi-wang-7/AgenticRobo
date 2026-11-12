@@ -78,9 +78,10 @@ class ActionVisualCheck(ManipulationVisualCheck):
     """A manipulation or drawer check attributed to a current image."""
 
     fact: Literal[
-        "holding", "placement_ready", "handle_level", "contact_ready", "access_clear"
+        "identity", "holding", "placement_ready", "handle_level", "contact_ready", "access_clear"
     ]
     value: str | bool | None = None
+    status: Literal["verified", "uncertain", "failed", "rejected"] | None = None
 
 
 def build_action_query(
@@ -182,9 +183,10 @@ def build_action_query(
             )
         )
     seen_claims = set()
+    checkable_keys = {identity_key, *claim_keys}
     for check in visual_checks:
         key = f"{check.fact}:{check.object_id}"
-        if key not in claim_keys or key in seen_claims:
+        if key not in checkable_keys or key in seen_claims:
             raise ValueError(f"Unexpected or duplicate visual check: {key}")
         if (
             check.step != step
@@ -192,21 +194,43 @@ def build_action_query(
             or check.artifact not in artifacts
         ):
             raise ValueError(f"Visual check requires a current camera artifact: {key}")
-        if check.fact == "handle_level" and (
+
+        status = "claimed"
+        source = "planner_visual_claim"
+        if check.fact == "identity":
+            if check.object_id != geometry_object:
+                raise ValueError("Identity evidence must match the candidate's geometry object")
+            if not check.artifact.startswith("agentview"):
+                raise ValueError("Identity evidence must come from the agentview camera")
+            if check.value != check.object_id:
+                raise ValueError("Verified identity value must equal the task object ID")
+            if check.status not in {"verified", "uncertain", "rejected"}:
+                raise ValueError("Identity evidence requires verified, uncertain or rejected status")
+            status = "verified" if check.status == "verified" else "claimed"
+            source = "planner_agentview_identity_attestation"
+        elif check.fact == "holding":
+            if not check.artifact.startswith("wrist"):
+                raise ValueError("Grasp evidence must come from the wrist camera")
+            if check.status not in {None, "verified", "uncertain", "failed"}:
+                raise ValueError("Holding evidence requires verified, uncertain or failed status")
+            status = "verified" if check.status == "verified" else "claimed"
+            source = "planner_wrist_grasp_assessment"
+        elif check.fact == "handle_level" and (
             not drawer or check.value != drawer.target_level
         ):
             raise ValueError("Observed handle level conflicts with drawer candidate")
-        if check.fact in {"contact_ready", "access_clear"} and check.value is not True:
+        elif check.fact in {"contact_ready", "access_clear"} and check.value is not True:
             raise ValueError(
                 "Drawer positive checks require value=true; report failures separately"
             )
+
         seen_claims.add(key)
         facts.append(
             ActionFact(
                 key=key,
-                status="claimed",
+                status=status,
                 evidence_ref=f"{step}:{check.artifact}",
-                source="planner_visual_claim",
+                source=source,
             )
         )
 
