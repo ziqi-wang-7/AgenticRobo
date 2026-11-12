@@ -145,6 +145,38 @@ def validate_identity_tool_schema(declaration: Any) -> dict[str, Any]:
     }
 
 
+def _omit_repeated_memory_bodies(context: str) -> str:
+    """Return an ID-only receipt for an identical query already delivered."""
+    lines = context.splitlines()
+    if len(lines) < 3:
+        raise ValueError("Cannot compact malformed Memory retrieval context")
+    info = json.loads(lines[1])
+    selected = list(info.get("selected_ids", ()))
+    info.update(
+        new_memory_ids=[],
+        already_delivered_ids=selected,
+        new_memory_tokens=0,
+        repeated_query=True,
+    )
+    historical_index = next(
+        (
+            index for index, line in enumerate(lines)
+            if line.startswith("Historical coordinates")
+        ),
+        None,
+    )
+    if historical_index is None:
+        raise ValueError("Memory context is missing its evidence preamble")
+    header = "\n".join([lines[0], json.dumps(info, ensure_ascii=False)])
+    preamble = lines[historical_index]
+    body = "\n\n".join(
+        f"[MEMORY BODY OMITTED: {memory_id} was already delivered for this "
+        "unchanged query. Use force_full_delivery after context compaction.]"
+        for memory_id in selected
+    )
+    return header + "\n" + preamble + "\n\n" + body
+
+
 def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
     """Bind an immutable index without loading memory bodies into the prompt."""
     root, index = (
@@ -245,6 +277,7 @@ class M2LiberoToolkit(LiberoToolkit):
         self._localization_evidence: dict[str, dict] = {}
         self._memory_seen: dict[tuple[int, str], set[str]] = {}
         self._review_decisions: dict[tuple[int, str, str], dict[str, str]] = {}
+        self._retrieval_cache: dict[str, dict[str, Any]] = {}
         for name in ("back_project", "segment"):
             original = self._tools[name]
             self.add_tool(
@@ -610,6 +643,53 @@ class M2LiberoToolkit(LiberoToolkit):
             }
             if rejected:
                 state["rejected_entries"] = sorted(rejected)
+            request_fingerprint = hashlib.sha256(
+                json.dumps(
+                    {
+                        "step": step,
+                        "purpose": purpose,
+                        "candidate_fingerprint": candidate_fingerprint,
+                        "action_facts": [
+                            asdict(item) for item in action_query.facts
+                        ] if action_query else [],
+                        "issue": " ".join(issue.casefold().split()),
+                        "failure_signature": failure_signature,
+                        "applicable_entries": sorted(confirmed),
+                        "rejected_entries": sorted(rejected),
+                        "delivered_entries": sorted(delivered),
+                        "localization_ids": sorted(bindings.items()),
+                        "visual_checks": [
+                            item.model_dump() for item in normalized_visual_checks
+                        ],
+                    },
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            cached = (
+                self._retrieval_cache.get(request_fingerprint)
+                if not force_full_delivery
+                else None
+            )
+            if cached is not None:
+                response_context = _omit_repeated_memory_bodies(cached["context"])
+                response = ToolResult(data={"memory_context": response_context})
+                trace = {
+                    **cached["trace"],
+                    "cache_hit": True,
+                    "repeated_query": True,
+                    "files_read": 0,
+                    "files_opened": [],
+                    "elapsed_ms": 0.0,
+                    "response_sha256": hashlib.sha256(
+                        response.to_text().encode()
+                    ).hexdigest(),
+                }
+                with (memory.output_dir / "m2-retrievals.jsonl").open("a") as stream:
+                    stream.write(
+                        json.dumps(trace, ensure_ascii=False, allow_nan=False) + "\n"
+                    )
+                return response
+
             retrieved = memory.controller.retrieve_with_trace(
                 memory.record["task"], observation, state, action_query=action_query
             )
@@ -658,4 +738,9 @@ class M2LiberoToolkit(LiberoToolkit):
                 stream.write(
                     json.dumps(trace, ensure_ascii=False, allow_nan=False) + "\n"
                 )
+            if not force_full_delivery:
+                self._retrieval_cache[request_fingerprint] = {
+                    "context": retrieved.context,
+                    "trace": trace,
+                }
             return response
