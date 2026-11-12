@@ -167,6 +167,67 @@ def test_new_index_can_resolve_previously_unavailable_case(indexed):
     assert not header(found)["unavailable_recovery"]
 
 
+def test_spatial_failure_uses_bounded_raw_fallback_when_index_case_missing(indexed):
+    from repro.memcodex_corpus import encoded
+
+    wanted = add_entry(
+        indexed,
+        "raw/spatial",
+        source="task-family/libero_10_swap_t6.md",
+        text=(
+            "Right-side relation unmet for the chocolate pudding box; there is not "
+            "enough grasp space near the mug. Push the pudding box aside, rotate "
+            "the wrist, create more space, re-localize and retry the grasp."
+        ),
+        skills=("pi0_pick", "move_to", "release"),
+        provides=("skill", "recovery"),
+    )
+    _, index = indexed
+    data = json.loads(index.read_text())
+    entry = next(
+        item for item in data["entries"].values() if item["key"] == wanted
+    )
+    # Simulate an index whose structured recovery annotation missed the
+    # narrative remedy; the hash-checked raw body remains authoritative.
+    entry["recovery_cases"] = []
+    index.write_bytes(encoded(data))
+
+    result = m2.query(
+        m2.controller(indexed),
+        purpose="recover",
+        issue="right-side relation unmet",
+        failure_object="chocolate_pudding",
+        phase="recovery",
+    )
+    assert wanted in result.selected_ids
+    assert result.layers_visited[-1] == "raw"
+    assert result.memory_read_complete
+    assert "Push the pudding box aside" in result.context
+    assert result.files_read <= 5
+
+
+def test_spatial_raw_fallback_does_not_claim_unrelated_body_as_coverage(indexed):
+    add_entry(
+        indexed,
+        "raw/unrelated_spatial",
+        source="task-family/libero_10_swap_t6.md",
+        text="The chocolate pudding box is visible. Use pi0_pick and move_to.",
+        skills=("pi0_pick", "move_to", "release"),
+        provides=("skill", "recovery"),
+    )
+    result = m2.query(
+        m2.controller(indexed),
+        purpose="recover",
+        issue="right-side relation unmet",
+        failure_object="chocolate_pudding",
+        phase="recovery",
+    )
+    assert not result.memory_read_complete
+    assert "recovery_case:wrong_spatial_relation" in result.memory_missing
+    assert result.routing_steps[-1]["action"] == "EXHAUSTED"
+    assert "raw" in result.layers_visited
+
+
 def test_custom_exhausted_cannot_hide_known_guidance(indexed):
     control = m2.controller(indexed)
     control.route = lambda ctx: RoutingDecision("EXHAUSTED")
