@@ -254,12 +254,15 @@ def retrieve_indexed(
                 if m["key"] not in delivered_entries
             ),
             "recovery_coverage": bool(recovery) and not any(
-                item.startswith("recovery_case:") for item in memory_missing
+                item.startswith("recovery_case:") or item == "recovery_guidance"
+                for item in memory_missing
             ),
             "unresolved_failures": [
                 item.removeprefix("recovery_case:")
-                for item in memory_missing
                 if item.startswith("recovery_case:")
+                else item
+                for item in memory_missing
+                if item.startswith("recovery_case:") or item == "recovery_guidance"
             ],
             "exact_summary_available": bool(profile["layers"]["summary"]),
         }
