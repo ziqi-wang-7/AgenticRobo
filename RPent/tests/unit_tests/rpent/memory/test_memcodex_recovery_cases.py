@@ -118,6 +118,19 @@ def test_explicit_failure_keeps_additional_causes_from_issue_text():
     ) == ("object_collision", "object_tipped")
 
 
+def test_narrative_recovery_cases_keep_sentence_level_object_scope():
+    text = (
+        "The gripper housing contacts the white mug. "
+        "The white mug leans slightly. "
+        "Move the pudding box aside, rotate the wrist, re-localize and retry."
+    )
+    cases = recovery_cases(text)
+    collision = next(case for case in cases if case["kind"] == "object_collision")
+    tipped = next(case for case in cases if case["kind"] == "object_tipped")
+    assert collision["object_types"] == ["mug"]
+    assert tipped["object_types"] == ["mug"]
+
+
 def test_slight_lean_is_classified_as_tipped_and_multi_object_scope_is_separate():
     assert "object_tipped" in failure_kinds(
         "The white mug leans slightly after the gripper housing contacts it."
