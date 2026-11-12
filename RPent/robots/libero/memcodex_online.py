@@ -210,7 +210,11 @@ class IndexedMemoryManager(FixedMemoryManager):
 
     def _authorize(self, path: str | Path, *, write: bool) -> Path:
         resolved = (get_repo_root() / path).resolve()
-        if resolved.name in {"m2-config.json", "m2-retrievals.jsonl"}:
+        if resolved.name in {
+            "m2-config.json",
+            "m2-retrievals.jsonl",
+            "m2-runtime-tool-schema.json",
+        }:
             raise PermissionError("M2 configuration and measurements are private")
         return super()._authorize(path, write=write)
 
@@ -251,7 +255,7 @@ class M2LiberoToolkit(LiberoToolkit):
         schema_audit["contract"] = "M2.2-A.2"
         schema_audit["source_revision"] = SOURCE_REVISION
         (self.memory.output_dir / "m2-runtime-tool-schema.json").write_text(
-            json.dumps(schema_audit, indent=2) + "\\n",
+            json.dumps(schema_audit, indent=2) + "\n",
             encoding="utf-8",
         )
 
