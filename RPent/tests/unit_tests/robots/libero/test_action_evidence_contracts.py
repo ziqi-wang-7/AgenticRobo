@@ -558,7 +558,8 @@ def test_repeated_memory_review_is_idempotent_within_failure_scope(action_run):
     header = json.loads(repeated["context"].splitlines()[1])
     assert header["review_entries"] == []
     assert repeated["reviewed_entry_count"] == len(selected)
-    assert repeated["new_review_decisions"] == len(selected)
+    assert repeated["new_review_decisions"] == 0
+    assert repeated["cache_hit"] is True
 
 
 def test_identical_retrieval_query_uses_compact_cached_receipt(action_run):
