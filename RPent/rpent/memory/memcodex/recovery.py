@@ -24,18 +24,28 @@ import re
 
 FAILURES = {
     "wrong_drawer": r"wrong (?:drawer|handle|layer)|(?:middle|upper|top) drawer (?:rather than|instead of)|wrong.*drawer|drawer.*wrong|wrong.*layer",
+    "wrong_spatial_relation": r"(?:wrong|incorrect|unmet|unsatisfied|not satisfied).{0,45}(?:left|right|side|spatial|relation|placement)|(?:left|right)[ -]side.{0,35}(?:relation|placement).{0,25}(?:unmet|wrong|incorrect|not satisfied)|(?:relation|placement).{0,35}(?:wrong side|wrong direction|not satisfied|unmet)|placed? on the wrong side",
+    "object_collision": r"\bcollision\b|collid(?:e|ed|ing|es)|bump(?:ed|ing)? into|hit (?:the )?(?:cup|mug|object|obstacle)",
+    "grasp_space_insufficient": r"(?:not enough|insufficient|limited|no).{0,35}(?:grasp|gripping|pickup) space|(?:grasp|gripping|pickup) space.{0,35}(?:insufficient|blocked|too small)|no room to (?:grasp|pick)|obstructed grasp",
+    "object_tipped": r"\btipp?ed\b|tilt(?:ed|ing)? over|fell over|toppl(?:ed|ing)",
     "object_slipped": r"\bslip(?:s|ped|ping)?\b|\bdrop(?:ped|ping)?\b|lost (?:the )?(?:grasp|grip|mug|pot|object)",
     "grasp_not_closed": r"(?:finger|gripper)s?.{0,30}(?:stay|remain|still|left).{0,15}open|no clos|does not close|did not close|no lift|without (?:closing|closure)|open.finger",
     "insertion_blocked": r"(?:insert|insertion|cavity|mouth).{0,60}(?:stall|block|obstruct|jam)|(?:stall|block|obstruct|jam).{0,60}(?:insert|insertion|cavity|mouth)",
     "release_stuck": r"(?:releas|open finger|withdraw).{0,60}(?:caught|follow|hook|stuck)|(?:caught|hook|stuck).{0,60}(?:releas|withdraw)",
+    "placement_not_satisfied": r"(?:placement|place|put|set).{0,45}(?:goal|predicate|target|relation).{0,25}(?:not satisfied|unmet|failed|wrong)|(?:goal|predicate).{0,35}(?:not satisfied|unmet) after (?:placement|release)",
     "contact_stalled": r"\bstall(?:ed|s|ing)?\b|no progress|(?:drawer|door).{0,35}(?:still|remain|left).{0,15}closed|(?:left|kept).{0,20}drawer.{0,10}closed|(?:missed|no).{0,15}(?:contact|engagement)",
 }
 _PHASES = {
     "wrong_drawer": {"approach", "articulate", "recovery"},
+    "wrong_spatial_relation": {"transport", "release", "recovery"},
+    "object_collision": {"approach", "grasp", "transport", "recovery"},
+    "grasp_space_insufficient": {"approach", "grasp", "recovery"},
+    "object_tipped": {"grasp", "transport", "insert", "recovery"},
     "object_slipped": {"grasp", "transport", "insert", "recovery"},
     "grasp_not_closed": {"approach", "grasp", "recovery"},
     "insertion_blocked": {"insert", "recovery"},
     "release_stuck": {"release", "recovery"},
+    "placement_not_satisfied": {"transport", "release", "recovery"},
     "contact_stalled": set(),
 }
 
@@ -64,6 +74,9 @@ def object_types(text: str) -> set[str]:
             "drawer": r"drawer|cabinet",
             "microwave": r"microwave",
             "milk": r"\bmilk\b",
+            "pudding_box": r"pudding(?:[ _-]*box)?|chocolate_pudding",
+            "cup": r"\bcup\b|_cup\b",
+            "plate": r"\bplate\b|_plate\b",
         }.items()
         if re.search(pattern, text, re.I)
     }
@@ -90,7 +103,7 @@ def recovery_cases(text: str) -> list[dict]:
         symptom = columns[0] if len(columns) >= 3 else passage
         response = columns[-1] if len(columns) >= 3 else passage
         if not re.search(
-            r"re-?locali[sz]|retry|re-?grasp|re-?pick|adjust|retreat|withdraw|re-?clamp|explicit.{0,15}clos|close the|reopen|switch|reverse|tilt|preposition|reposition|lower|stop|check|inspect|verify",
+            r"re-?locali[sz]|retry|re-?grasp|re-?pick|adjust|retreat|withdraw|re-?clamp|explicit.{0,15}clos|close the|reopen|switch|reverse|tilt|preposition|reposition|lower|stop|check|inspect|verify|push|move aside|clear (?:the )?(?:obstacle|space|object)|create (?:more )?space|make room|rotate|yaw|change orientation|realign|correct (?:the )?(?:side|position)",
             response,
             re.I,
         ):
