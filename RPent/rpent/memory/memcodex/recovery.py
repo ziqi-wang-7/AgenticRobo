@@ -90,7 +90,6 @@ def object_types(text: str) -> set[str]:
             "pudding_box": r"pudding(?:[ _-]*box)?|chocolate_pudding",
             "cup": r"\bcup\b|_cup\b",
             "plate": r"\bplate\b|_plate\b",
-            "pudding_box": r"pudding(?:[ _-]*box)?|chocolate_pudding",
             "gripper": r"gripper|wrist housing|robot hand",
 
         }.items()
