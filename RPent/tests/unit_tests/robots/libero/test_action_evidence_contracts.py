@@ -22,7 +22,10 @@ import pytest
 from pydantic import ValidationError
 
 from repro.liberopro_baseline import command, report
-from robots.libero.memcodex_online import prepare_indexed_memory
+from robots.libero.memcodex_online import (
+    prepare_indexed_memory,
+    validate_identity_tool_schema,
+)
 from robots.libero.robot_spec import get_robot_spec
 from robots.libero.tools import LiberoPrimitives, view_env_state
 from rpent.robots.robot_spec import RunConfig
@@ -75,6 +78,45 @@ def _carry(**args):
         "roles": {"held_object": "milk", "destination": "basket"},
         "expected_effect": "hold the milk while moving to the basket",
     }
+
+
+def test_non_drawer_runtime_tool_publishes_identity_schema(action_run):
+    kit, _, _ = action_run
+    declaration = kit._tools["retrieve_memory"]
+    validate_identity_tool_schema(declaration)
+
+    schema = declaration.input_schema
+    visual = schema["properties"]["visual_checks"]
+    item = visual["items"]
+    if "$ref" in item:
+        ref = item["$ref"]
+        for component in ref[2:].split("/"):
+            item = schema[component] if component.startswith("$defs") else item
+        item = schema["$defs"][ref.split("/")[-1]]
+    assert "identity" in item["properties"]["fact"]["enum"]
+    assert {"value", "status"} <= set(item["properties"])
+
+
+def test_runtime_schema_validation_rejects_stale_legacy_wrapper(action_run):
+    kit, _, _ = action_run
+    declaration = kit._tools["retrieve_memory"]
+    legacy = declaration.input_schema
+    legacy = {**legacy, "properties": dict(legacy["properties"])}
+    legacy["properties"]["visual_checks"] = {
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "fact": {"enum": ["holding", "placement_ready"]},
+                "object_id": {"type": "string"},
+                "step": {"type": "integer"},
+                "artifact": {"type": "string"},
+            },
+        },
+    }
+    stale = replace(declaration, _input_schema=legacy)
+    with pytest.raises(RuntimeError, match="stale"):
+        validate_identity_tool_schema(stale)
 
 
 def test_pick_uses_registered_defaults_without_executing(action_run):
