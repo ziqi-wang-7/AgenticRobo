@@ -34,6 +34,11 @@ from robots.libero.action_evidence import (
     build_action_query,
 )
 from robots.libero.memcodex import SOURCE_REVISION
+from robots.libero.recovery_controller import (
+    RecoveryBudget,
+    apply_recovery_budget,
+    select_recovery_plan,
+)
 from robots.libero.recovery_evidence import (
     DrawerProgress,
     FailureObservation,
@@ -45,6 +50,7 @@ from robots.libero.recovery_evidence import (
 from robots.libero.toolkit import LiberoToolkit
 from rpent.memory.memcodex import MemCodexController
 from rpent.memory.memcodex.adapter import FixedMemoryManager
+from rpent.memory.memcodex.recovery import requirements as recovery_requirements
 from rpent.robots.robot_spec import RunConfig
 from rpent.tools.base import ToolResult, tool
 from rpent.utils.config import get_repo_root
@@ -285,6 +291,7 @@ class M2LiberoToolkit(LiberoToolkit):
         self._memory_seen: dict[tuple[int, str], set[str]] = {}
         self._review_decisions: dict[tuple[int, str, str], dict[str, str]] = {}
         self._retrieval_cache: dict[str, dict[str, Any]] = {}
+        self._recovery_budget = RecoveryBudget()
         for name in ("back_project", "segment"):
             original = self._tools[name]
             self.add_tool(
@@ -664,10 +671,33 @@ class M2LiberoToolkit(LiberoToolkit):
                 "force_full_delivery": force_full_delivery,
                 "review_limit_reached": review_limit_reached,
                 "review_no_progress": review_no_progress,
+                "recovery_strategy": state.get("recovery_strategy"),
+                "recovery_state_machine": state.get("recovery_state_machine", []),
+                "recovery_budget": state.get("recovery_budget"),
+                "recovery_budget_exhausted": state.get("recovery_budget_exhausted", False),
+                "recovery_execution_authorized": False,
                 **failure_state,
             }
             if rejected:
                 state["rejected_entries"] = sorted(rejected)
+            recovery_kinds = (
+                recovery_requirements(
+                    {
+                        "failure_kind": failure_state.get("failure_kind"),
+                        "failure_object": failure_state.get("failure_object"),
+                        "phase": failure_state.get("phase"),
+                        "failure_cases": failure_state.get("failure_cases", ()),
+                        "issue": issue,
+                    }
+                )
+                if purpose == "recover" or state["needs_recovery"]
+                else ()
+            )
+            recovery_plan = (
+                select_recovery_plan(recovery_kinds)
+                if recovery_kinds
+                else None
+            )
             memory.controller.indexed.check_revision()
             request_fingerprint = hashlib.sha256(
                 json.dumps(
@@ -733,6 +763,26 @@ class M2LiberoToolkit(LiberoToolkit):
                     )
                 return response
 
+            budget_plan = (
+                apply_recovery_budget(recovery_plan, self._recovery_budget)
+                if recovery_plan is not None
+                else None
+            )
+            if budget_plan is not None and budget_plan.strategy == "stop":
+                state["recovery_budget_exhausted"] = True
+                state["recovery_budget"] = self._recovery_budget.snapshot()
+                state["recovery_strategy"] = "stop"
+                state["recovery_state_machine"] = list(budget_plan.state_machine)
+                state["recovery_execution_authorized"] = False
+                # Do not claim retrieval coverage when stopping on budget.
+                state["recovery_budget_reason"] = budget_plan.reason
+            else:
+                state["recovery_budget_exhausted"] = False
+                state["recovery_budget"] = self._recovery_budget.snapshot()
+                if budget_plan is not None:
+                    state["recovery_strategy"] = budget_plan.strategy
+                    state["recovery_state_machine"] = list(budget_plan.state_machine)
+                    state["recovery_execution_authorized"] = False
             retrieved = memory.controller.retrieve_with_trace(
                 memory.record["task"], observation, state, action_query=action_query
             )
