@@ -17,6 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+from robots.libero.skill_abstraction import Skill, compatible_recovery_skills
+
 RecoveryStrategy = Literal[
     "grasp", "spatial", "contact", "observe", "stop"
 ]
@@ -61,16 +63,24 @@ class RecoveryPlan:
     state_machine: tuple[str, ...]
     reason: str
     execution_authorized: bool = False
+    active_skill: Skill = "unknown"
+    compatible_skills: tuple[str, ...] = ()
 
 
-def select_recovery_plan(failure_kinds: tuple[str, ...] | list[str]) -> RecoveryPlan:
-    """Route observed failures to the narrowest applicable skill workflow."""
+def select_recovery_plan(
+    failure_kinds: tuple[str, ...] | list[str],
+    active_skill: Skill = "unknown",
+) -> RecoveryPlan:
+    """Route by observed failure and active skill, never by task identifier."""
     kinds = set(failure_kinds)
+    compatible = compatible_recovery_skills(tuple(kinds), active_skill)
     if not kinds:
         return RecoveryPlan(
             "observe",
             ("REOBSERVE", "CLASSIFY_FAILURE"),
             "no_attributed_failure",
+            active_skill=active_skill,
+            compatible_skills=compatible,
         )
     if kinds & {"insertion_blocked", "release_stuck", "contact_stalled"}:
         return RecoveryPlan(
@@ -85,6 +95,8 @@ def select_recovery_plan(failure_kinds: tuple[str, ...] | list[str]) -> Recovery
                 "RELOCALIZE_OR_STOP",
             ),
             "contact_or_insertion_failure",
+            active_skill=active_skill,
+            compatible_skills=compatible,
         )
     if kinds & {"wrong_spatial_relation", "placement_not_satisfied", "object_collision"}:
         return RecoveryPlan(
@@ -98,6 +110,8 @@ def select_recovery_plan(failure_kinds: tuple[str, ...] | list[str]) -> Recovery
                 "VERIFY_PLACEMENT",
             ),
             "spatial_relation_or_collision_failure",
+            active_skill=active_skill,
+            compatible_skills=compatible,
         )
     if kinds & {
         "grasp_not_closed",
@@ -117,11 +131,15 @@ def select_recovery_plan(failure_kinds: tuple[str, ...] | list[str]) -> Recovery
                 "VERIFY_OBJECT_FOLLOWS",
             ),
             "grasp_or_object_stability_failure",
+            active_skill=active_skill,
+            compatible_skills=compatible,
         )
     return RecoveryPlan(
         "observe",
         ("REOBSERVE", "REFINE_FAILURE_CLASSIFICATION"),
         "unmapped_failure_requires_observation",
+        active_skill=active_skill,
+        compatible_skills=compatible,
     )
 
 
