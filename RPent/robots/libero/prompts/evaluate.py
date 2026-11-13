@@ -677,6 +677,20 @@ or failure={kind, object_id, phase, step, artifact} and recover. A false Pi0
 heuristic without visual confirmation is uncertain, not a confirmed failure.
 A servo residual is a request to inspect progress, not proof of contact failure.
 
+Use the Skill-specific Recovery Controller when purpose=recover. It routes
+observed failure kinds to one workflow: grasp (reobserve pose → change grasp
+geometry → attempt → closure check → short lift → verify object follows),
+spatial (inspect relation → check direct correction feasibility → inspect swept
+path/clearance → choose safe correction or re-grasp → relocalize → verify
+placement), or contact (pre-align → verify orientation → approach opening →
+verify contact → short push → verify insertion depth). Unknown or ambiguous
+failures route to OBSERVE; exhausted recovery budget routes to STOP with an
+honest unresolved-failure report. These are ordered decision stages, not
+permission to execute all actions. Each primitive requires current geometry,
+its own action preconditions, and a fresh observation before the next stage.
+Do not use the grasp workflow for insertion failures or the contact workflow
+for ordinary pick-and-place errors.
+
 For recovery, report a specific current-image-attributed failure kind whenever
 the observation supports it: wrong_spatial_relation, object_collision,
 grasp_space_insufficient, object_tipped, placement_not_satisfied,
