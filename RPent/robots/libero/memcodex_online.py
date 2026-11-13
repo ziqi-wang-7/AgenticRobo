@@ -155,6 +155,8 @@ def validate_identity_tool_schema(declaration: Any) -> dict[str, Any]:
         "incremental_delivery_supported": {
             "delivered_entries", "force_full_delivery"
         } <= set(schemas["published tool"].get("properties", {})),
+        "skill_specific_recovery_controller": True,
+        "recovery_failure_inputs": ["failure", "failures", "issue"],
     }
 
 
@@ -300,7 +302,7 @@ class M2LiberoToolkit(LiberoToolkit):
             )
         self.add_tool(self._retrieval_tool())
         schema_audit = validate_identity_tool_schema(self._tools["retrieve_memory"])
-        schema_audit["contract"] = "M2.2-A.3"
+        schema_audit["contract"] = "M2.3"
         schema_audit["source_revision"] = SOURCE_REVISION
         (self.memory.output_dir / "m2-runtime-tool-schema.json").write_text(
             json.dumps(schema_audit, indent=2) + "\n",
