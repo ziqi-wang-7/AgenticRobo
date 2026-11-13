@@ -39,6 +39,7 @@ from robots.libero.recovery_controller import (
     apply_recovery_budget,
     select_recovery_plan,
 )
+from robots.libero.skill_abstraction import infer_skill_context
 from robots.libero.recovery_evidence import (
     DrawerProgress,
     FailureObservation,
@@ -673,6 +674,11 @@ class M2LiberoToolkit(LiberoToolkit):
                 "force_full_delivery": force_full_delivery,
                 "review_limit_reached": review_limit_reached,
                 "review_no_progress": review_no_progress,
+                "skill_context": skill_context.as_dict(),
+                "compatible_recovery_skills": (
+                    list(recovery_plan.compatible_skills)
+                    if recovery_plan is not None else []
+                ),
                 "recovery_strategy": state.get("recovery_strategy"),
                 "recovery_state_machine": state.get("recovery_state_machine", []),
                 "recovery_budget": state.get("recovery_budget"),
@@ -695,8 +701,23 @@ class M2LiberoToolkit(LiberoToolkit):
                 if purpose == "recover" or state["needs_recovery"]
                 else ()
             )
+            skill_context = infer_skill_context(
+                tool=(
+                    normalized_candidate.get("tool")
+                    if normalized_candidate
+                    else action
+                ),
+                roles=(
+                    normalized_candidate.get("roles", {})
+                    if normalized_candidate
+                    else {}
+                ),
+            )
             recovery_plan = (
-                select_recovery_plan(recovery_kinds)
+                select_recovery_plan(
+                    recovery_kinds,
+                    active_skill=skill_context.active_skill,
+                )
                 if recovery_kinds
                 else None
             )
