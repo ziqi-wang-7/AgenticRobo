@@ -6,6 +6,10 @@
 #
 #     https://www.apache.org/licenses/LICENSE-2.0
 
+from robots.libero.skill_abstraction import (
+    compatible_recovery_skills,
+    infer_skill_context,
+)
 from robots.libero.recovery_controller import (
     MAX_ATTEMPTS_PER_STRATEGY,
     RecoveryBudget,
@@ -63,3 +67,46 @@ def test_recovery_budget_stops_after_bounded_strategy_attempts():
     ]
     assert plans[-1].reason == "recovery_budget_exhausted:grasp"
     assert budget.snapshot()["total_attempts"] == MAX_ATTEMPTS_PER_STRATEGY
+
+def test_skill_abstraction_uses_primitive_semantics_not_task_ids():
+    grasp = infer_skill_context(
+        tool="pi0_pick",
+        roles={"target_object": "arbitrary_object"},
+    )
+    insertion = infer_skill_context(task_operation="insertion")
+    placement = infer_skill_context(
+        tool="release",
+        roles={"held_object": "object_a", "destination": "object_b"},
+    )
+    assert grasp.active_skill == "grasp"
+    assert insertion.active_skill == "insertion"
+    assert placement.active_skill == "placement"
+    assert grasp.target_role == "arbitrary_object"
+    assert placement.destination_role == "object_b"
+
+
+def test_same_failure_routes_independently_of_task_identity():
+    first = select_recovery_plan(["grasp_not_closed"], active_skill="grasp")
+    second = select_recovery_plan(["grasp_not_closed"], active_skill="grasp")
+    assert first.strategy == second.strategy == "grasp"
+    assert first.state_machine == second.state_machine
+
+
+def test_multiple_failure_types_preserve_all_compatible_recovery_skills():
+    skills = compatible_recovery_skills(
+        ["object_collision", "object_tipped", "insertion_blocked"],
+        "insertion",
+    )
+    assert skills == ("grasp_recovery", "spatial_recovery", "contact_recovery")
+
+
+def test_active_insertion_skill_does_not_relabel_failure_as_task_specific():
+    context = infer_skill_context(
+        task_operation="insertion",
+        roles={"target_object": "yellow_mug"},
+    )
+    plan = select_recovery_plan(["insertion_blocked"], context.active_skill)
+    assert plan.strategy == "contact"
+    assert plan.active_skill == "insertion"
+    assert plan.execution_authorized is False
+
