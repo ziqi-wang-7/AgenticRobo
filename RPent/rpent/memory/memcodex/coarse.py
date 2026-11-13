@@ -253,6 +253,21 @@ def retrieve_indexed(
                 for m, text in items
                 if m["key"] not in delivered_entries
             ),
+            "memory_coverage": not memory_missing,
+            "evidence_coverage": not (
+                action_missing_facts or action_unverified_facts
+            ) if action_query is not None else not state_missing,
+            "action_feasibility": (
+                not (action_missing_facts or action_unverified_facts)
+                if action_query is not None else None
+            ),
+            "physical_progress": "not_observed_by_memory_retrieval",
+            "recovery_complete": False,
+            "recovery_strategy": state.get("recovery_strategy"),
+            "recovery_state_machine": state.get("recovery_state_machine", []),
+            "recovery_budget": state.get("recovery_budget"),
+            "recovery_budget_exhausted": state.get("recovery_budget_exhausted", False),
+            "recovery_execution_authorized": False,
             "recovery_coverage": bool(recovery) and not any(
                 item.startswith("recovery_case:") or item == "recovery_guidance"
                 for item in memory_missing
