@@ -66,6 +66,7 @@ def validate_support_footprint(
     return {
         "object_base_xyz": list(map(float, object_base_xyz)),
         "support_center_xyz": list(map(float, support_center_xyz)),
+        "base_to_support_z_delta_m": float(object_base_xyz[2]) - float(support_center_xyz[2]),
         "object_radius_m": object_radius,
         "support_radius_m": support_radius,
         "center_offset_m": center_offset,
