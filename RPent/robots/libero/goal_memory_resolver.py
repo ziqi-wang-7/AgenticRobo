@@ -20,6 +20,34 @@ Axis = Literal["x", "y", "z"]
 Relation = Literal["left_of", "right_of", "front_of", "behind", "above", "below"]
 
 
+def extract_markdown_frontmatter(text: str) -> tuple[str, str]:
+    """Extract YAML frontmatter even when an indexed entry prepends a notice.
+
+    Returns (frontmatter, body). Only a delimiter pair on standalone lines is
+    accepted; arbitrary prose containing '---' is not treated as metadata.
+    """
+    lines = text.splitlines()
+    delimiters = [
+        index for index, line in enumerate(lines)
+        if line.strip() == "---"
+    ]
+    for opening, closing in zip(delimiters, delimiters[1:]):
+        if closing <= opening:
+            continue
+        frontmatter = "\n".join(lines[opening + 1:closing]).strip()
+        if not frontmatter:
+            continue
+        # Require task-family identity fields so an unrelated horizontal rule
+        # in a preamble/body cannot be mistaken for the source metadata.
+        if any(
+            line.startswith(("id:", "scope:", "suite:", "regime:", "task_id:"))
+            for line in frontmatter.splitlines()
+        ):
+            body = "\n".join(lines[closing + 1:]).strip()
+            return frontmatter, body
+    return "", text
+
+
 @dataclass(frozen=True)
 class TaskScope:
     suite: str
