@@ -133,6 +133,80 @@ def resolve_relation(
     )
 
 
+def task_family_relation_evidence(
+    *,
+    metadata: dict,
+    body: str,
+    suite: str,
+    task_id: int,
+    target_object: str,
+    reference_object: str,
+    relation: Relation,
+) -> RelationEvidence | None:
+    """Build evidence from a delivered Raw entry and its immutable source refs.
+
+    Indexed extractive entries do not retain Markdown frontmatter: the converter
+    prepends an applicability preamble and stores provenance in INDEX metadata.
+    Scope is therefore bound to the exact source_ref; success and relation are
+    checked against the delivered source text. No planner-authored claims enter.
+    """
+    regime = suite.replace("libero_10_", "")
+    expected_source = f"task-family/task-family_libero10_{regime}_t{task_id}.md"
+    source_refs = {
+        ref.split("#", 1)[0] for ref in metadata.get("source_refs", ())
+    }
+    if metadata.get("layer") != "raw" or expected_source not in source_refs:
+        return None
+
+    normalized = " ".join(
+        body.casefold().replace("-", " ").replace("_", " ").split()
+    )
+    target = target_object.replace("_", " ").casefold()
+    reference = reference_object.replace("_", " ").casefold()
+    if target not in normalized or reference not in normalized:
+        return None
+
+    success_markers = (
+        "worked cleanly",
+        "success:",
+        "predicate fired",
+        "solved successfully",
+        "successful placement",
+    )
+    if not any(marker in normalized for marker in success_markers):
+        return None
+
+    if relation == "right_of":
+        if "+y (image-right)" in body.casefold() or "right side = +y" in normalized:
+            axis, sign = "y", 1
+        elif "right of the plate = -y" in normalized:
+            axis, sign = "y", -1
+        else:
+            return None
+    elif relation == "left_of":
+        if "left of the plate = +y" in normalized:
+            axis, sign = "y", 1
+        elif "left of the plate = -y" in normalized:
+            axis, sign = "y", -1
+        else:
+            return None
+    else:
+        # Other relations need an explicit, separately validated mapping.
+        return None
+
+    return RelationEvidence(
+        relation=relation,
+        axis=axis,
+        sign=sign,
+        suite=f"libero10/{regime}",
+        task_id=task_id,
+        target_object=target_object,
+        reference_object=reference_object,
+        successful=True,
+        source_id=metadata["key"],
+    )
+
+
 def validate_candidate_relation(
     *,
     resolution: RelationResolution,
