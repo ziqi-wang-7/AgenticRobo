@@ -234,6 +234,20 @@ def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
     }
     controller = make_controller(record)
     controller.indexed.profile(record["task"])
+    # Audit whether the exact task-family recipe is actually represented in
+    # the built index. A source file existing in the original package does not
+    # imply that the runtime corpus contains or can retrieve it.
+    index_payload = json.loads(index.read_text(encoding="utf-8"))
+    index_text = json.dumps(index_payload, ensure_ascii=False)
+    exact_recipe_name = f"task-family_{args.suite.replace('libero_10_', 'libero10_')}_t{args.task}.md"
+    exact_recipe_indexed = exact_recipe_name in index_text
+    task_memory_audit = {
+        "task": record["task"],
+        "expected_task_family_source": exact_recipe_name,
+        "exact_task_family_source_indexed": exact_recipe_indexed,
+        "index_sha256": record["index_sha256"],
+        "action": "available_for_retrieval" if exact_recipe_indexed else "missing_from_runtime_index",
+    }
     output = Path(config.output_dir).resolve()
     view = output / "memory-view"
     view.mkdir(parents=True, exist_ok=False)
@@ -241,6 +255,10 @@ def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
         "Use retrieve_memory for indexed task experience.\n"
     )
     (output / "m2-config.json").write_text(json.dumps(record, indent=2) + "\n")
+    (output / "m2-task-memory-audit.json").write_text(
+        json.dumps(task_memory_audit, indent=2) + "\n",
+        encoding="utf-8",
+    )
     config.prompt_vars.update(
         memory_mode="m2",
         memory_dir=str(view),
