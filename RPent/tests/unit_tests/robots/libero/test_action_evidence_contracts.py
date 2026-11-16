@@ -661,6 +661,28 @@ def test_incremental_memory_delivery_omits_only_explicitly_retained_bodies(actio
     assert "[MEMORY BODY OMITTED:" not in full.data["memory_context"]
 
 
+def test_placement_geometry_validators_are_registered(action_run):
+    kit, _, _ = action_run
+    assert "validate_mug_base_support" in kit._tools
+    assert "validate_object_path_clearance" in kit._tools
+    support_schema = kit._tools["validate_mug_base_support"].input_schema
+    assert {
+        "step",
+        "mug_base_center_evidence_id",
+        "mug_base_boundary_evidence_ids",
+        "plate_center_evidence_id",
+        "plate_boundary_evidence_ids",
+    } <= set(support_schema["properties"])
+    clearance_schema = kit._tools["validate_object_path_clearance"].input_schema
+    assert {
+        "step",
+        "path_xyz",
+        "obstacle_center_evidence_id",
+        "moving_object_center_evidence_id",
+        "moving_object_boundary_evidence_ids",
+    } <= set(clearance_schema["properties"])
+
+
 def test_goal_memory_conflict_resolver_tool_is_registered(action_run):
     kit, _, _ = action_run
     assert "validate_goal_relation" in kit._tools
