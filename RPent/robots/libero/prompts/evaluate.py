@@ -103,6 +103,26 @@ DISAMBIGUATION / TARGETING:
   image-RIGHT.** A geometrically-perfect placement of the WRONG target never fires
   the predicate — when a clean placement won't terminate, SUSPECT WRONG-TARGET
   before wrong-physics (this turned a "physically impossible" verdict into a solve).
+- **GOAL–MEMORY SPATIAL CONFLICT RESOLUTION (mandatory before any release).**
+  The egocentric left/right convention above is a DEFAULT, not permission to
+  ignore an applicable successful task-specific exception. First extract the
+  current task's exact suite, task id, target object, reference object and goal
+  relation from the runtime task instruction. Then inspect retrieved memory
+  applicability and successful outcome. A memory may override the generic
+  direction convention ONLY when suite, task id, target object, reference
+  object and relation all match the current task and the memory records a
+  successful outcome. A sibling suite/task, a different target object, an
+  unverified anecdote, or a generic skill recipe cannot override the default.
+  If two applicable successful records disagree, do not guess: re-observe and
+  calibrate the relation from current agentview geometry.
+  Never reuse historical xyz. Re-localize the reference object and candidate
+  placement region in the current scene, compute the signed relation on the
+  resolved axis, and state the measured delta and pass/fail before release.
+  If the candidate is on the opposite side, DO NOT release; revise the
+  candidate. This signed-side check is necessary but not sufficient: also
+  verify support surface, clearance, reachability and stability. Record
+  goal_relation, generic_relation, selected_memory_id, resolved_axis,
+  resolved_sign, candidate_delta, and goal_constraint_passed in the audit.
 - Containers can be MOVABLE (e.g. a basket slides when bumped) — descend into the
   interior CENTER from straight above, not against the rim; SAM3's centroid of a
   frame-clipped/reflective container is rim-biased, so derive the true cavity
