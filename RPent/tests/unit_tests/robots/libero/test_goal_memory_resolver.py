@@ -10,6 +10,7 @@ from robots.libero.goal_memory_resolver import (
     RelationEvidence,
     TaskScope,
     resolve_relation,
+    task_family_relation_evidence,
     validate_candidate_relation,
 )
 
@@ -169,4 +170,61 @@ def test_unsuccessful_exact_task_memory_cannot_override_generic():
     )
     assert resolution.source == "unresolved"
     assert resolution.source_id is None
+
+def test_indexed_raw_entry_with_preface_binds_exact_swap_t6_success():
+    # Runtime extractive entries prepend a notice and strip the source
+    # Markdown frontmatter. Provenance is carried by INDEX source_refs.
+    body = """Historical seed-0 experience. Re-localize in the current scene.
+
+    ## Applicable pattern
+    Place the chocolate-pudding box to the right of the plate.
+
+    ## Winning technique
+    Order here was MUG FIRST, then pudding (worked cleanly).
+    Carry to the +y (IMAGE-RIGHT) side of the plate.
+    """
+    metadata = {
+        "key": "raw:90fe45a875944dc295362f15",
+        "layer": "raw",
+        "source_refs": [
+            "task-family/task-family_libero10_swap_t6.md#L1-L97"
+        ],
+    }
+    evidence = task_family_relation_evidence(
+        metadata=metadata,
+        body=body,
+        suite="libero_10_swap",
+        task_id=6,
+        target_object="chocolate_pudding",
+        reference_object="plate",
+        relation="right_of",
+    )
+    assert evidence is not None
+    assert evidence.suite == "libero10/swap"
+    assert evidence.sign == 1
+    assert evidence.source_id == "raw:90fe45a875944dc295362f15"
+
+
+def test_sibling_task_or_non_raw_entry_cannot_bind_exact_swap_t6():
+    body = (
+        "Chocolate pudding to the right of the plate; "
+        "worked cleanly; +y (IMAGE-RIGHT)."
+    )
+    metadata = {
+        "key": "skills:wrong-scope",
+        "layer": "skills",
+        "source_refs": [
+            "task-family/task-family_libero10_task_t6.md#L1-L97"
+        ],
+    }
+    evidence = task_family_relation_evidence(
+        metadata=metadata,
+        body=body,
+        suite="libero_10_swap",
+        task_id=6,
+        target_object="chocolate_pudding",
+        reference_object="plate",
+        relation="right_of",
+    )
+    assert evidence is None
 
