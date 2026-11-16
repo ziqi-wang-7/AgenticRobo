@@ -325,8 +325,8 @@ class M2LiberoToolkit(LiberoToolkit):
         relation: Literal["left_of", "right_of", "front_of", "behind", "above", "below"],
         target_object: str,
         reference_object: str,
-        target_coordinate: float,
-        reference_coordinate: float,
+        target_xyz: list[float],
+        reference_xyz: list[float],
         generic_axis: Literal["x", "y", "z"] | None = None,
         generic_sign: Literal[-1, 1] | None = None,
         memory_suite: str | None = None,
@@ -355,8 +355,11 @@ class M2LiberoToolkit(LiberoToolkit):
             objects = set(profile["required_objects"]) | set(profile.get("context_objects", ()))
             if target_object not in objects or reference_object not in objects:
                 raise ValueError("Goal relation objects must belong to the current task")
-            if not math.isfinite(target_coordinate) or not math.isfinite(reference_coordinate):
-                raise ValueError("Goal relation coordinates must be finite")
+            if (
+                len(target_xyz) != 3 or len(reference_xyz) != 3
+                or not all(math.isfinite(value) for value in (*target_xyz, *reference_xyz))
+            ):
+                raise ValueError("Goal relation requires finite current-step xyz vectors")
             if not math.isfinite(minimum_separation) or minimum_separation < 0:
                 raise ValueError("minimum_separation must be finite and non-negative")
             generic = (
@@ -381,6 +384,13 @@ class M2LiberoToolkit(LiberoToolkit):
                     successful=memory_successful,
                     source_id=memory_source_id,
                 ))
+            if evidence and evidence[0].source_id not in {
+                memory_id
+                for (seen_step, _), memory_ids in self._memory_seen.items()
+                if seen_step == step
+                for memory_id in memory_ids
+            }:
+                evidence = []
             resolution = resolve_relation(
                 scope=TaskScope(
                     suite=suite,
@@ -392,6 +402,9 @@ class M2LiberoToolkit(LiberoToolkit):
                 generic=generic,
                 memories=evidence,
             )
+            axis_index = {"x": 0, "y": 1, "z": 2}[resolution.axis]
+            target_coordinate = target_xyz[axis_index]
+            reference_coordinate = reference_xyz[axis_index]
             passed = validate_candidate_relation(
                 resolution=resolution,
                 target_coordinate=target_coordinate,
@@ -411,6 +424,8 @@ class M2LiberoToolkit(LiberoToolkit):
                 "resolved_sign": resolution.sign,
                 "resolution_source": resolution.source,
                 "conflict": resolution.conflict,
+                "target_xyz": target_xyz,
+                "reference_xyz": reference_xyz,
                 "candidate_delta": target_coordinate - reference_coordinate,
                 "minimum_separation": minimum_separation,
                 "goal_constraint_passed": passed,
