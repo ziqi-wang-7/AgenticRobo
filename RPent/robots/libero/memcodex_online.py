@@ -348,14 +348,7 @@ class M2LiberoToolkit(LiberoToolkit):
         reference_xyz: list[float],
         generic_axis: Literal["x", "y", "z"] | None = None,
         generic_sign: Literal[-1, 1] | None = None,
-        memory_suite: str | None = None,
-        memory_task_id: int | None = None,
-        memory_target_object: str | None = None,
-        memory_reference_object: str | None = None,
-        memory_axis: Literal["x", "y", "z"] | None = None,
-        memory_sign: Literal[-1, 1] | None = None,
-        memory_successful: bool = False,
-        memory_source_id: str | None = None,
+        allow_generic_fallback: bool = False,
         minimum_separation: float = 0.0,
     ) -> ToolResult:
         """Resolve a spatial convention conflict and validate a fresh candidate.
@@ -381,38 +374,92 @@ class M2LiberoToolkit(LiberoToolkit):
                 raise ValueError("Goal relation requires finite current-step xyz vectors")
             if not math.isfinite(minimum_separation) or minimum_separation < 0:
                 raise ValueError("minimum_separation must be finite and non-negative")
-            generic = (
-                (generic_axis, generic_sign)
-                if generic_axis is not None and generic_sign is not None
-                else None
-            )
-            evidence = []
-            if all(value is not None for value in (
-                memory_suite, memory_task_id, memory_target_object,
-                memory_reference_object, memory_axis, memory_sign,
-                memory_source_id,
-            )):
-                evidence.append(RelationEvidence(
-                    relation=relation,
-                    axis=memory_axis,
-                    sign=memory_sign,
-                    suite=memory_suite,
-                    task_id=memory_task_id,
-                    target_object=memory_target_object,
-                    reference_object=memory_reference_object,
-                    successful=memory_successful,
-                    source_id=memory_source_id,
-                ))
-            if evidence and evidence[0].source_id not in {
+            # Memory evidence is bound by the runtime from entries actually
+            # returned in this step. Planner-supplied success/scope claims are
+            # intentionally not accepted.
+            seen_ids = {
                 memory_id
                 for (seen_step, _), memory_ids in self._memory_seen.items()
                 if seen_step == step
                 for memory_id in memory_ids
-            }:
-                evidence = []
+            }
+            indexed_entries = self.memory.controller.indexed.index["entries"]
+            evidence = []
+            for metadata in indexed_entries.values():
+                if metadata.get("key") not in seen_ids:
+                    continue
+                source_refs = " ".join(metadata.get("source_refs", ()))
+                if not any(
+                    name in source_refs
+                    for name in (
+                        f"task-family_libero10_swap_t{task_id}.md",
+                        f"task-family_libero10_task_t{task_id}.md",
+                    )
+                ):
+                    continue
+                entry = self.memory.controller.indexed.read(metadata)
+                body = entry.text
+                frontmatter = body.split("---", 2)[1] if body.startswith("---") else ""
+                if not (
+                    f"task_id: {task_id}" in frontmatter
+                    and "solved_seeds:" in frontmatter
+                    and "attempts:" in frontmatter
+                ):
+                    continue
+                # The source's declared suite/regime and task language are
+                # checked against the current task before its relation is used.
+                source_suite = "libero10"
+                source_regime = "swap" if "libero10_swap" in source_refs else "task"
+                if suite.replace("libero_10_", "") != source_regime:
+                    continue
+                normalized_body = " ".join(body.casefold().split())
+                relation_phrase = {
+                    "right_of": ("right of the plate", "right-of"),
+                    "left_of": ("left of the plate", "left-of"),
+                    "front_of": ("front of the plate", "front-of"),
+                    "behind": ("behind the plate",),
+                }.get(relation, ())
+                if not any(phrase in normalized_body for phrase in relation_phrase):
+                    continue
+                axis = None
+                sign = None
+                if relation == "right_of" and (
+                    "+y (image-right)" in normalized_body
+                    or "right of the plate = +y" in normalized_body
+                    or "right side = +y" in normalized_body
+                ):
+                    axis, sign = "y", 1
+                elif relation == "right_of" and "right of the plate = -y" in normalized_body:
+                    axis, sign = "y", -1
+                if axis is None:
+                    continue
+                solved = "solved_seeds:" in frontmatter and not re.search(
+                    r"solved_seeds:\\s*\\[\\s*\\]", frontmatter
+                )
+                if not solved:
+                    continue
+                evidence.append(RelationEvidence(
+                    relation=relation,
+                    axis=axis,
+                    sign=sign,
+                    suite=f"libero10/{source_regime}",
+                    task_id=task_id,
+                    target_object=target_object,
+                    reference_object=reference_object,
+                    successful=True,
+                    source_id=metadata["key"],
+                ))
+            current_scope_suite = f"libero10/{suite.replace('libero_10_', '')}"
+            generic = (
+                (generic_axis, generic_sign)
+                if allow_generic_fallback
+                and generic_axis is not None
+                and generic_sign is not None
+                else None
+            )
             resolution = resolve_relation(
                 scope=TaskScope(
-                    suite=suite,
+                    suite=current_scope_suite,
                     task_id=task_id,
                     target_object=target_object,
                     reference_object=reference_object,
@@ -434,6 +481,12 @@ class M2LiberoToolkit(LiberoToolkit):
                 "step": step,
                 "suite": suite,
                 "task_id": task_id,
+                "seen_memory_ids": sorted(seen_ids),
+                "applicable_memory_evidence": [
+                    {"source_id": item.source_id, "axis": item.axis, "sign": item.sign}
+                    for item in evidence
+                ],
+                "allow_generic_fallback": allow_generic_fallback,
                 "goal_relation": relation,
                 "target_object": target_object,
                 "reference_object": reference_object,
