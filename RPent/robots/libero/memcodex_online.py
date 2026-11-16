@@ -354,7 +354,6 @@ class M2LiberoToolkit(LiberoToolkit):
         reference_xyz: list[float],
         generic_axis: Literal["x", "y", "z"] | None = None,
         generic_sign: Literal[-1, 1] | None = None,
-        allow_generic_fallback: bool = False,
         minimum_separation: float = 0.0,
     ) -> ToolResult:
         """Resolve a spatial convention conflict and validate a fresh candidate.
@@ -471,9 +470,7 @@ class M2LiberoToolkit(LiberoToolkit):
             current_scope_suite = f"libero10/{suite.replace('libero_10_', '')}"
             generic = (
                 (generic_axis, generic_sign)
-                if allow_generic_fallback
-                and generic_axis is not None
-                and generic_sign is not None
+                if generic_axis is not None and generic_sign is not None
                 else None
             )
             resolution = resolve_relation(
@@ -486,6 +483,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 relation=relation,
                 generic=generic,
                 memories=evidence,
+                require_exact_success=True,
             )
             axis_index = {"x": 0, "y": 1, "z": 2}[resolution.axis]
             target_coordinate = target_xyz[axis_index]
@@ -505,7 +503,6 @@ class M2LiberoToolkit(LiberoToolkit):
                     {"source_id": item.source_id, "axis": item.axis, "sign": item.sign}
                     for item in evidence
                 ],
-                "allow_generic_fallback": allow_generic_fallback,
                 "goal_relation": relation,
                 "target_object": target_object,
                 "reference_object": reference_object,
