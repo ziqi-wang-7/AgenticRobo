@@ -68,10 +68,10 @@ def test_sibling_suite_memory_cannot_override_generic_convention():
         relation="right_of",
         generic=("y", -1),
         memories=[sibling],
+        require_exact_success=True,
     )
-    assert resolution.source == "generic_convention"
-    assert resolution.sign == -1
-    assert resolution.conflict is False
+    assert resolution.source == "unresolved"
+    assert resolution.source_id is None
 
 
 def test_wrong_target_or_reference_cannot_override_direction():
@@ -136,8 +136,9 @@ def test_missing_exact_task_memory_without_generic_fallback_fails_closed():
     resolution = resolve_relation(
         scope=_scope(),
         relation="right_of",
-        generic=None,
+        generic=("y", -1),
         memories=[],
+        require_exact_success=True,
     )
     assert resolution.source == "unresolved"
     assert resolution.source_id is None
