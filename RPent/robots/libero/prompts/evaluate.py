@@ -214,7 +214,8 @@ tools. Do not start, stop, restart, or otherwise manage `env_server.py`.
 - Use bare tool names in this prompt: `move_to`, `pi0_pick`, `release`,
   `set_gripper`, `rotate_wrist`, `rotate_pitch`, `move_pose`, `pi0_doubled`,
   `view_env_state`, `view_camera_meta`, `back_project`, `segment`,
-  `read_text_file`, `write_text_file`, `list_dir`, `finish`.
+  `read_text_file`, `write_text_file`, `list_dir`, `validate_goal_relation`,
+  `validate_mug_base_support`, `validate_object_path_clearance`, `finish`.
 - Under some runtimes these same tools may appear namespaced; call the actual tool
   name shown in your tool list, preserving the same arguments and semantics.
 
