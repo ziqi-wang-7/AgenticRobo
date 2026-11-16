@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from argparse import Namespace
 from dataclasses import asdict
 from functools import partial
@@ -288,6 +289,8 @@ class IndexedMemoryManager(FixedMemoryManager):
             "m2-config.json",
             "m2-retrievals.jsonl",
             "m2-runtime-tool-schema.json",
+            "m2-task-memory-audit.json",
+            "m2-goal-relation-audit.jsonl",
         }:
             raise PermissionError("M2 configuration and measurements are private")
         return super()._authorize(path, write=write)
@@ -330,8 +333,11 @@ class M2LiberoToolkit(LiberoToolkit):
         self.add_tool(self._retrieval_tool())
         self.add_tool(self.validate_goal_relation)
         schema_audit = validate_identity_tool_schema(self._tools["retrieve_memory"])
-        schema_audit["contract"] = "M2.3-goal-memory-resolver"
+        schema_audit["contract"] = "M2.3.2-evidence-bound-goal-resolver"
         schema_audit["source_revision"] = SOURCE_REVISION
+        schema_audit["goal_relation_tool_registered"] = (
+            "validate_goal_relation" in self._tools
+        )
         (self.memory.output_dir / "m2-runtime-tool-schema.json").write_text(
             json.dumps(schema_audit, indent=2) + "\n",
             encoding="utf-8",
@@ -408,7 +414,6 @@ class M2LiberoToolkit(LiberoToolkit):
                     continue
                 # The source's declared suite/regime and task language are
                 # checked against the current task before its relation is used.
-                source_suite = "libero10"
                 source_regime = "swap" if "libero10_swap" in source_refs else "task"
                 if suite.replace("libero_10_", "") != source_regime:
                     continue
@@ -434,7 +439,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 if axis is None:
                     continue
                 solved = "solved_seeds:" in frontmatter and not re.search(
-                    r"solved_seeds:\\s*\\[\\s*\\]", frontmatter
+                    r"solved_seeds:\s*\[\s*\]", frontmatter
                 )
                 if not solved:
                     continue
@@ -505,7 +510,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 "reason": resolution.reason,
             }
             with (self.memory.output_dir / "m2-goal-relation-audit.jsonl").open("a") as stream:
-                stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\\n")
+                stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\n")
             return ToolResult(data=audit)
 
     def _retrieval_tool(self):
