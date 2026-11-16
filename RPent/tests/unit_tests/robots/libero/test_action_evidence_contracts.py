@@ -661,6 +661,20 @@ def test_incremental_memory_delivery_omits_only_explicitly_retained_bodies(actio
     assert "[MEMORY BODY OMITTED:" not in full.data["memory_context"]
 
 
+def test_goal_memory_conflict_resolver_is_registered_and_prompt_requires_it(action_run):
+    kit, _, _ = action_run
+    assert "validate_goal_relation" in kit._tools
+    declaration = kit._tools["validate_goal_relation"]
+    schema = declaration.input_schema
+    assert {"step", "relation", "target_object", "reference_object"} <= set(
+        schema["properties"]
+    )
+    assert {"target_xyz", "reference_xyz"} <= set(schema["properties"])
+    prompt = kit._spec.prompts.render("system", variables=kit._config.prompt_vars)
+    assert "GOAL–MEMORY SPATIAL CONFLICT RESOLUTION" in prompt
+    assert "validate_goal_relation" in prompt
+
+
 def test_action_evidence_flag_requires_m2_and_changes_only_opted_in_prompt(
     indexed, tmp_path
 ):
