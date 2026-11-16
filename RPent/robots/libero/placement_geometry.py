@@ -117,10 +117,7 @@ def validate_object_path_clearance(
     if not math.isfinite(clearance_margin_m) or clearance_margin_m < 0:
         raise ValueError("clearance_margin_m must be finite and non-negative")
     path = [list(map(float, _xy3(point))) for point in path_xyz]
-    obstacle = list(map(float, _xy(obstacle_center_xyz)))  # validate XY
-    obstacle[2] = float(obstacle_center_xyz[2])
-    if not math.isfinite(obstacle[2]):
-        raise ValueError("obstacle z must be finite")
+    obstacle = list(_xy3(obstacle_center_xyz))
     obstacle_radius = estimate_xy_radius(obstacle_center_xyz, obstacle_boundary_xyz)
     distances = [
         _point_segment_distance_3d(obstacle, path[i], path[i + 1])
