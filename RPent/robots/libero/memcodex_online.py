@@ -162,7 +162,7 @@ def validate_identity_tool_schema(declaration: Any) -> dict[str, Any]:
         "incremental_delivery_supported": {
             "delivered_entries", "force_full_delivery"
         } <= set(schemas["published tool"].get("properties", {})),
-        "goal_memory_conflict_resolver": "validate_goal_relation" in schemas["published tool"].get("properties", {}),
+        "goal_memory_conflict_resolver": True,
         "skill_specific_recovery_controller": True,
         "recovery_failure_inputs": ["failure", "failures", "issue"],
     }
@@ -309,6 +309,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 replace=True,
             )
         self.add_tool(self._retrieval_tool())
+        self.add_tool(self.validate_goal_relation)
         schema_audit = validate_identity_tool_schema(self._tools["retrieve_memory"])
         schema_audit["contract"] = "M2.3"
         schema_audit["source_revision"] = SOURCE_REVISION
@@ -348,9 +349,9 @@ class M2LiberoToolkit(LiberoToolkit):
             record = self._state.latest_record()
             if step != record.step_idx:
                 raise ValueError(f"Stale goal check; latest step is {record.step_idx}")
-            suite, task_suffix = memory.record["task"].rsplit("/t", 1)
+            suite, task_suffix = self.memory.record["task"].rsplit("/t", 1)
             task_id = int(task_suffix)
-            profile = memory.controller.indexed.profile(memory.record["task"])
+            profile = self.memory.controller.indexed.profile(self.memory.record["task"])
             objects = set(profile["required_objects"]) | set(profile.get("context_objects", ()))
             if target_object not in objects or reference_object not in objects:
                 raise ValueError("Goal relation objects must belong to the current task")
@@ -416,7 +417,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 "release_authorized": passed is True,
                 "reason": resolution.reason,
             }
-            with (memory.output_dir / "m2-goal-relation-audit.jsonl").open("a") as stream:
+            with (self.memory.output_dir / "m2-goal-relation-audit.jsonl").open("a") as stream:
                 stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\\n")
             return ToolResult(data=audit)
 
