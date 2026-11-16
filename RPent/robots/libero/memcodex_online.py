@@ -412,16 +412,24 @@ class M2LiberoToolkit(LiberoToolkit):
                     and "attempts:" in frontmatter
                 ):
                     continue
-                # The source's declared suite/regime and task language are
-                # checked against the current task before its relation is used.
-                source_regime = "swap" if "libero10_swap" in source_refs else "task"
-                if suite.replace("libero_10_", "") != source_regime:
+                # Require the source's own frontmatter scope to match; the
+                # filename alone is not accepted as a success certificate.
+                source_regime = "swap" if "regime: swap" in frontmatter else "task"
+                if (
+                    "suite: libero10" not in frontmatter
+                    or f"regime: {source_regime}" not in frontmatter
+                    or suite.replace("libero_10_", "") != source_regime
+                ):
                     continue
                 normalized_body = " ".join(
                     body.casefold().replace("-", " ").replace("_", " ").split()
                 )
-                target_phrase = target_object.replace("_", " ").casefold()
-                reference_phrase = reference_object.replace("_", " ").casefold()
+                target_phrase = re.sub(
+                    r"_?\\d+$", "", target_object.replace("_", " ")
+                ).casefold()
+                reference_phrase = re.sub(
+                    r"_?\\d+$", "", reference_object.replace("_", " ")
+                ).casefold()
                 if target_phrase not in normalized_body or reference_phrase not in normalized_body:
                     continue
                 relation_phrase = {
