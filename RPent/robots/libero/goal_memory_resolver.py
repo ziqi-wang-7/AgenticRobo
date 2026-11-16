@@ -58,6 +58,7 @@ def resolve_relation(
     relation: Relation,
     generic: tuple[Axis, Literal[-1, 1]] | None,
     memories: list[RelationEvidence],
+    require_exact_success: bool = False,
 ) -> RelationResolution:
     """Prefer verified successful evidence for the exact task/object relation.
 
@@ -87,6 +88,11 @@ def resolve_relation(
             relation, evidence.axis, evidence.sign, "exact_task_success",
             conflict, evidence.source_id,
             "exact_suite_task_and_object_match; re-localize and validate current scene",
+        )
+    if require_exact_success:
+        return RelationResolution(
+            relation, "y", 1, "unresolved", False, None,
+            "task_specific_success_evidence_missing; observe and calibrate before release",
         )
     if generic is not None:
         return RelationResolution(
