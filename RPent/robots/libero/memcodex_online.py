@@ -40,6 +40,12 @@ from robots.libero.recovery_controller import (
     select_recovery_plan,
 )
 from robots.libero.skill_abstraction import infer_skill_context
+from robots.libero.goal_memory_resolver import (
+    RelationEvidence,
+    TaskScope,
+    resolve_relation,
+    validate_candidate_relation,
+)
 from robots.libero.recovery_evidence import (
     DrawerProgress,
     FailureObservation,
@@ -156,6 +162,7 @@ def validate_identity_tool_schema(declaration: Any) -> dict[str, Any]:
         "incremental_delivery_supported": {
             "delivered_entries", "force_full_delivery"
         } <= set(schemas["published tool"].get("properties", {})),
+        "goal_memory_conflict_resolver": "validate_goal_relation" in schemas["published tool"].get("properties", {}),
         "skill_specific_recovery_controller": True,
         "recovery_failure_inputs": ["failure", "failures", "issue"],
     }
@@ -309,6 +316,109 @@ class M2LiberoToolkit(LiberoToolkit):
             json.dumps(schema_audit, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    @tool(readonly=True)
+    def validate_goal_relation(
+        self,
+        step: int,
+        relation: Literal["left_of", "right_of", "front_of", "behind", "above", "below"],
+        target_object: str,
+        reference_object: str,
+        target_coordinate: float,
+        reference_coordinate: float,
+        generic_axis: Literal["x", "y", "z"] | None = None,
+        generic_sign: Literal[-1, 1] | None = None,
+        memory_suite: str | None = None,
+        memory_task_id: int | None = None,
+        memory_target_object: str | None = None,
+        memory_reference_object: str | None = None,
+        memory_axis: Literal["x", "y", "z"] | None = None,
+        memory_sign: Literal[-1, 1] | None = None,
+        memory_successful: bool = False,
+        memory_source_id: str | None = None,
+        minimum_separation: float = 0.0,
+    ) -> ToolResult:
+        """Resolve a spatial convention conflict and validate a fresh candidate.
+
+        Memory evidence is eligible only with exact suite/task/object/relation
+        scope and an explicitly identified successful source. Coordinates must
+        come from current-step localization, never from the memory body.
+        """
+        with self._memory_lock:
+            record = self._state.latest_record()
+            if step != record.step_idx:
+                raise ValueError(f"Stale goal check; latest step is {record.step_idx}")
+            suite, task_suffix = memory.record["task"].rsplit("/t", 1)
+            task_id = int(task_suffix)
+            profile = memory.controller.indexed.profile(memory.record["task"])
+            objects = set(profile["required_objects"]) | set(profile.get("context_objects", ()))
+            if target_object not in objects or reference_object not in objects:
+                raise ValueError("Goal relation objects must belong to the current task")
+            if not math.isfinite(target_coordinate) or not math.isfinite(reference_coordinate):
+                raise ValueError("Goal relation coordinates must be finite")
+            if not math.isfinite(minimum_separation) or minimum_separation < 0:
+                raise ValueError("minimum_separation must be finite and non-negative")
+            generic = (
+                (generic_axis, generic_sign)
+                if generic_axis is not None and generic_sign is not None
+                else None
+            )
+            evidence = []
+            if all(value is not None for value in (
+                memory_suite, memory_task_id, memory_target_object,
+                memory_reference_object, memory_axis, memory_sign,
+                memory_source_id,
+            )):
+                evidence.append(RelationEvidence(
+                    relation=relation,
+                    axis=memory_axis,
+                    sign=memory_sign,
+                    suite=memory_suite,
+                    task_id=memory_task_id,
+                    target_object=memory_target_object,
+                    reference_object=memory_reference_object,
+                    successful=memory_successful,
+                    source_id=memory_source_id,
+                ))
+            resolution = resolve_relation(
+                scope=TaskScope(
+                    suite=suite,
+                    task_id=task_id,
+                    target_object=target_object,
+                    reference_object=reference_object,
+                ),
+                relation=relation,
+                generic=generic,
+                memories=evidence,
+            )
+            passed = validate_candidate_relation(
+                resolution=resolution,
+                target_coordinate=target_coordinate,
+                reference_coordinate=reference_coordinate,
+                minimum_separation=minimum_separation,
+            )
+            audit = {
+                "step": step,
+                "suite": suite,
+                "task_id": task_id,
+                "goal_relation": relation,
+                "target_object": target_object,
+                "reference_object": reference_object,
+                "generic_relation": list(generic) if generic else None,
+                "selected_memory_id": resolution.source_id,
+                "resolved_axis": resolution.axis,
+                "resolved_sign": resolution.sign,
+                "resolution_source": resolution.source,
+                "conflict": resolution.conflict,
+                "candidate_delta": target_coordinate - reference_coordinate,
+                "minimum_separation": minimum_separation,
+                "goal_constraint_passed": passed,
+                "release_authorized": passed is True,
+                "reason": resolution.reason,
+            }
+            with (memory.output_dir / "m2-goal-relation-audit.jsonl").open("a") as stream:
+                stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\\n")
+            return ToolResult(data=audit)
 
     def _retrieval_tool(self):
         """Publish the full current-step schema for every M2 task.
