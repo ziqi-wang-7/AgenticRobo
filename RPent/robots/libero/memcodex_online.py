@@ -48,6 +48,7 @@ from robots.libero.goal_memory_resolver import (
     validate_candidate_relation,
 )
 from robots.libero.placement_geometry import (
+    estimate_xy_radius,
     validate_support_footprint,
     validate_object_path_clearance,
 )
@@ -569,7 +570,8 @@ class M2LiberoToolkit(LiberoToolkit):
         path_xyz: list[list[float]],
         obstacle_center_evidence_id: str,
         obstacle_boundary_evidence_ids: list[str],
-        moving_object_radius_m: float,
+        moving_object_center_evidence_id: str,
+        moving_object_boundary_evidence_ids: list[str],
         clearance_margin_m: float = 0.015,
     ) -> ToolResult:
         """Screen a carried object's current planned path against a localized obstacle.
@@ -585,16 +587,25 @@ class M2LiberoToolkit(LiberoToolkit):
             task_objects = set(profile["required_objects"]) | set(profile.get("context_objects", ()))
             if moving_object_id not in task_objects or obstacle_object_id not in task_objects:
                 raise ValueError("Path objects must belong to the current task")
-            ids = [obstacle_center_evidence_id, *obstacle_boundary_evidence_ids]
+            ids = [
+                obstacle_center_evidence_id,
+                *obstacle_boundary_evidence_ids,
+                moving_object_center_evidence_id,
+                *moving_object_boundary_evidence_ids,
+            ]
             evidence = self._current_geometry_evidence(step, ids)
             by_id = {item["id"]: item for item in evidence}
+            moving_radius = estimate_xy_radius(
+                by_id[moving_object_center_evidence_id]["xyz"],
+                [by_id[key]["xyz"] for key in moving_object_boundary_evidence_ids],
+            )
             result = validate_object_path_clearance(
                 path_xyz=path_xyz,
                 obstacle_center_xyz=by_id[obstacle_center_evidence_id]["xyz"],
                 obstacle_boundary_xyz=[
                     by_id[key]["xyz"] for key in obstacle_boundary_evidence_ids
                 ],
-                moving_object_radius_m=moving_object_radius_m,
+                moving_object_radius_m=moving_radius,
                 clearance_margin_m=clearance_margin_m,
             )
             audit = {
@@ -602,6 +613,10 @@ class M2LiberoToolkit(LiberoToolkit):
                 "step": step,
                 "moving_object_id": moving_object_id,
                 "obstacle_object_id": obstacle_object_id,
+                "moving_object_radius_evidence_ids": [
+                    moving_object_center_evidence_id,
+                    *moving_object_boundary_evidence_ids,
+                ],
                 "evidence_ids": ids,
                 "path_xyz": path_xyz,
                 **result,
