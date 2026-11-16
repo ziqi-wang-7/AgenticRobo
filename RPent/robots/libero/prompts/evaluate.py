@@ -119,13 +119,16 @@ DISAMBIGUATION / TARGETING:
   placement region in the current scene, compute the signed relation on the
   resolved axis, and state the measured delta and pass/fail before release.
   Call the read-only `validate_goal_relation` tool with the current step,
-  current-task target/reference object IDs, freshly localized coordinates,
-  generic convention, and exact-scope successful memory evidence. Use its
-  resolved sign; do not self-approve a conflicting direction. If the tool
-  returns goal_constraint_passed=false or null, DO NOT release. A true result
-  validates only the signed relation, not support, collision clearance,
-  reachability or stability; verify those independently. Record the tool result
-  in the action audit.
+  current-task target/reference object IDs and freshly localized xyz vectors.
+  Do NOT supply or invent memory suite, task, success, sign or source metadata:
+  the runtime derives eligible evidence only from Memory IDs actually returned
+  in this step and their hash-checked indexed source bodies. If the exact
+  task-family success evidence is absent, ambiguous or not indexed, the resolver
+  fails closed (unresolved); do not opt into generic fallback for a known
+  task-specific directional exception. If the tool returns
+  goal_constraint_passed=false or null, DO NOT release. A true result validates
+  only the signed relation, not support, collision clearance, reachability or
+  stability; verify those independently. Record the tool result in the audit.
 - Containers can be MOVABLE (e.g. a basket slides when bumped) — descend into the
   interior CENTER from straight above, not against the rim; SAM3's centroid of a
   frame-clipped/reflective container is rim-biased, so derive the true cavity
