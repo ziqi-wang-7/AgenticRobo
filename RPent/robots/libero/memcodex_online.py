@@ -463,13 +463,14 @@ class M2LiberoToolkit(LiberoToolkit):
                     continue
                 axis = None
                 sign = None
+                source_text = body.casefold()
                 if relation == "right_of" and (
-                    "+y (image-right)" in normalized_body
-                    or "right of the plate = +y" in normalized_body
-                    or "right side = +y" in normalized_body
+                    "+y (image-right)" in source_text
+                    or "right of the plate = +y" in source_text
+                    or "right side = +y" in source_text
                 ):
                     axis, sign = "y", 1
-                elif relation == "right_of" and "right of the plate = -y" in normalized_body:
+                elif relation == "right_of" and "right of the plate = -y" in source_text:
                     axis, sign = "y", -1
                 if axis is None:
                     continue
@@ -478,6 +479,7 @@ class M2LiberoToolkit(LiberoToolkit):
                 )
                 if not solved:
                     continue
+                source_regime = suite.replace("libero_10_", "")
                 evidence.append(RelationEvidence(
                     relation=relation,
                     axis=axis,
