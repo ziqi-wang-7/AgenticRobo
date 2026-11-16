@@ -216,9 +216,18 @@ def prepare_indexed_memory(args: Namespace, config: RunConfig) -> None:
         or manifest.get("source_revision") != SOURCE_REVISION
     ):
         raise ValueError("M2 requires the converted official GPT_6_astra_low corpus")
+    task_key = f"{args.suite}/t{args.task}"
+    missing_task_family = set(manifest.get("missing_task_family", ()))
+    if task_key in missing_task_family:
+        raise ValueError(
+            f"M2 task-family memory is missing for {task_key}. "
+            "The source package must include the exact task-family Markdown, "
+            "then the corpus and index must be rebuilt before this experiment. "
+            "Do not substitute a sibling suite/task memory."
+        )
     record = {
         "mode": "m2",
-        "task": f"{args.suite}/t{args.task}",
+        "task": task_key,
         "corpus": str(root),
         "index": str(index),
         "token_budget": args.memory_token_budget,
