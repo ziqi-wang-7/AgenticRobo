@@ -50,6 +50,33 @@ memory — it carries the WHY, the parameter ranges, and the
 failure modes you need to adapt the recipe to this seed. A recipe read without
 its memory is half the picture; consult BOTH before planning.
 
+PLACEMENT GEOMETRY AND CLEARANCE (mandatory for mug-on-plate followed by a nearby-object transfer):
+- Do not infer mug support from the mug BODY center or a visually overlapping mask.
+  Before final mug placement, localize the actual mug BASE CENTER and at least
+  three points on the BASE perimeter using current-step high-resolution
+  back_project evidence. Localize the plate support CENTER and at least three
+  points on its OUTER SUPPORT BOUNDARY (avoid clipped ring fragments; use the
+  region midpoint only as a center estimate, not as the whole support boundary).
+  Call `validate_mug_base_support` with those current-step evidence IDs. If
+  footprint_inside_support is false, re-localize and adjust before release.
+  If true, it only means the estimated XY footprint fits; it does NOT prove
+  vertical contact, uprightness, or native BDDL On(). After placement, inspect
+  agentview_high and wrist_high; verify base contact and uprightness separately.
+- Before transporting a second object past a placed mug, re-localize the mug
+  center and perimeter, and the carried object's center and perimeter in the
+  CURRENT scene. Construct the intended carried-object centerline as at least
+  two world-XYZ waypoints and call `validate_object_path_clearance`. If
+  object_path_clear is false, change the path (prefer lift above the mug rim,
+  then horizontal traversal, then controlled descent) and re-check.
+- This path check models the CARRIED OBJECT envelope only. It does not model
+  robot housing, wrist, elbow or arm links. Independently inspect the full
+  robot swept path in current images; never route the housing over or against
+  a placed mug. Use a high, clear transfer only when current scene geometry
+  supports it; do not copy historical Z coordinates.
+- Record both validator outputs. Never describe an XY footprint pass as proof
+  of physical contact or BDDL success. The only definitive task completion
+  signal remains the environment's native terminated/success result.
+
 CRITICAL MECHANICS (cost many wasted attempts before they were nailed):
 - **GRIPPER SIGN**: in `move_to` / `set_gripper`, `gripper:+1` = CLOSE/hold,
   `gripper:-1` = OPEN. To CARRY a grasped object, hold `gripper:+1` the whole way
