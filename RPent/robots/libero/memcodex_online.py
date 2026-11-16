@@ -47,6 +47,10 @@ from robots.libero.goal_memory_resolver import (
     resolve_relation,
     validate_candidate_relation,
 )
+from robots.libero.placement_geometry import (
+    validate_support_footprint,
+    validate_object_path_clearance,
+)
 from robots.libero.recovery_evidence import (
     DrawerProgress,
     FailureObservation,
@@ -165,6 +169,10 @@ def validate_identity_tool_schema(declaration: Any) -> dict[str, Any]:
         } <= set(schemas["published tool"].get("properties", {})),
         "goal_memory_conflict_resolver": True,
         "goal_relation_audit_file": "m2-goal-relation-audit.jsonl",
+        "placement_geometry_tools": [
+            "validate_mug_base_support",
+            "validate_object_path_clearance",
+        ],
         "skill_specific_recovery_controller": True,
         "recovery_failure_inputs": ["failure", "failures", "issue"],
     }
@@ -300,6 +308,7 @@ class IndexedMemoryManager(FixedMemoryManager):
             "m2-runtime-tool-schema.json",
             "m2-task-memory-audit.json",
             "m2-goal-relation-audit.jsonl",
+            "m2-placement-geometry-audit.jsonl",
         }:
             raise PermissionError("M2 configuration and measurements are private")
         return super()._authorize(path, write=write)
@@ -341,6 +350,8 @@ class M2LiberoToolkit(LiberoToolkit):
             )
         self.add_tool(self._retrieval_tool())
         self.add_tool(self.validate_goal_relation)
+        self.add_tool(self.validate_mug_base_support)
+        self.add_tool(self.validate_object_path_clearance)
         schema_audit = validate_identity_tool_schema(self._tools["retrieve_memory"])
         schema_audit["contract"] = "M2.3.2-evidence-bound-goal-resolver"
         schema_audit["source_revision"] = SOURCE_REVISION
@@ -469,6 +480,133 @@ class M2LiberoToolkit(LiberoToolkit):
             }
             with (self.memory.output_dir / "m2-goal-relation-audit.jsonl").open("a") as stream:
                 stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\n")
+            return ToolResult(data=audit)
+
+    def _current_geometry_evidence(
+        self, step: int, evidence_ids: list[str]
+    ) -> list[dict[str, Any]]:
+        if not evidence_ids or len(set(evidence_ids)) != len(evidence_ids):
+            raise ValueError("Provide distinct current-step geometry evidence IDs")
+        resolved = []
+        for evidence_id in evidence_ids:
+            item = self._localization_evidence.get(evidence_id)
+            if item is None or item.get("step") != step:
+                raise ValueError(f"Missing or stale geometry evidence: {evidence_id}")
+            if item.get("camera") not in {"agentview", "wrist"}:
+                raise ValueError(f"Unsupported geometry evidence camera: {evidence_id}")
+            if not item.get("source_artifact"):
+                raise ValueError(f"Geometry evidence has no source artifact: {evidence_id}")
+            resolved.append({"id": evidence_id, **item})
+        return resolved
+
+    def _write_geometry_audit(self, audit: dict[str, Any]) -> None:
+        with (self.memory.output_dir / "m2-placement-geometry-audit.jsonl").open("a") as stream:
+            stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\\n")
+
+    @tool(readonly=True)
+    def validate_mug_base_support(
+        self,
+        step: int,
+        mug_object_id: str,
+        plate_object_id: str,
+        mug_base_center_evidence_id: str,
+        mug_base_boundary_evidence_ids: list[str],
+        plate_center_evidence_id: str,
+        plate_boundary_evidence_ids: list[str],
+        edge_margin_m: float = 0.005,
+    ) -> ToolResult:
+        """Check current-scene mug-base footprint against the plate support area.
+
+        Every evidence ID must come from a current-step back_project/segment call.
+        Sample the mug BASE perimeter and plate outer support boundary, not object
+        body centers. This is a geometric screen, not native On() verification.
+        """
+        with self._memory_lock:
+            record = self._state.latest_record()
+            if step != record.step_idx:
+                raise ValueError(f"Stale placement check; latest step is {record.step_idx}")
+            profile = self.memory.controller.indexed.profile(self.memory.record["task"])
+            task_objects = set(profile["required_objects"]) | set(profile.get("context_objects", ()))
+            if mug_object_id not in task_objects or plate_object_id not in task_objects:
+                raise ValueError("Mug and plate must be current task objects")
+            ids = [
+                mug_base_center_evidence_id,
+                *mug_base_boundary_evidence_ids,
+                plate_center_evidence_id,
+                *plate_boundary_evidence_ids,
+            ]
+            evidence = self._current_geometry_evidence(step, ids)
+            by_id = {item["id"]: item for item in evidence}
+            result = validate_support_footprint(
+                object_base_xyz=by_id[mug_base_center_evidence_id]["xyz"],
+                support_center_xyz=by_id[plate_center_evidence_id]["xyz"],
+                object_boundary_xyz=[
+                    by_id[key]["xyz"] for key in mug_base_boundary_evidence_ids
+                ],
+                support_boundary_xyz=[
+                    by_id[key]["xyz"] for key in plate_boundary_evidence_ids
+                ],
+                edge_margin_m=edge_margin_m,
+            )
+            audit = {
+                "check": "mug_base_support",
+                "step": step,
+                "mug_object_id": mug_object_id,
+                "plate_object_id": plate_object_id,
+                "evidence_ids": ids,
+                **result,
+                "native_on_verified": False,
+            }
+            self._write_geometry_audit(audit)
+            return ToolResult(data=audit)
+
+    @tool(readonly=True)
+    def validate_object_path_clearance(
+        self,
+        step: int,
+        moving_object_id: str,
+        obstacle_object_id: str,
+        path_xyz: list[list[float]],
+        obstacle_center_evidence_id: str,
+        obstacle_boundary_evidence_ids: list[str],
+        moving_object_radius_m: float,
+        clearance_margin_m: float = 0.015,
+    ) -> ToolResult:
+        """Screen a carried object's current planned path against a localized obstacle.
+
+        This checks the carried-object envelope only. It does not model the robot
+        housing or arm links; inspect the images and keep those links clear too.
+        """
+        with self._memory_lock:
+            record = self._state.latest_record()
+            if step != record.step_idx:
+                raise ValueError(f"Stale path check; latest step is {record.step_idx}")
+            profile = self.memory.controller.indexed.profile(self.memory.record["task"])
+            task_objects = set(profile["required_objects"]) | set(profile.get("context_objects", ()))
+            if moving_object_id not in task_objects or obstacle_object_id not in task_objects:
+                raise ValueError("Path objects must belong to the current task")
+            ids = [obstacle_center_evidence_id, *obstacle_boundary_evidence_ids]
+            evidence = self._current_geometry_evidence(step, ids)
+            by_id = {item["id"]: item for item in evidence}
+            result = validate_object_path_clearance(
+                path_xyz=path_xyz,
+                obstacle_center_xyz=by_id[obstacle_center_evidence_id]["xyz"],
+                obstacle_boundary_xyz=[
+                    by_id[key]["xyz"] for key in obstacle_boundary_evidence_ids
+                ],
+                moving_object_radius_m=moving_object_radius_m,
+                clearance_margin_m=clearance_margin_m,
+            )
+            audit = {
+                "check": "object_path_clearance",
+                "step": step,
+                "moving_object_id": moving_object_id,
+                "obstacle_object_id": obstacle_object_id,
+                "evidence_ids": ids,
+                "path_xyz": path_xyz,
+                **result,
+            }
+            self._write_geometry_audit(audit)
             return ToolResult(data=audit)
 
     def _retrieval_tool(self):
