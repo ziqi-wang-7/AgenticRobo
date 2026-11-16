@@ -425,10 +425,10 @@ class M2LiberoToolkit(LiberoToolkit):
                     body.casefold().replace("-", " ").replace("_", " ").split()
                 )
                 target_phrase = re.sub(
-                    r"_?\\d+$", "", target_object.replace("_", " ")
+                    r"_?\d+$", "", target_object.replace("_", " ")
                 ).casefold()
                 reference_phrase = re.sub(
-                    r"_?\\d+$", "", reference_object.replace("_", " ")
+                    r"_?\d+$", "", reference_object.replace("_", " ")
                 ).casefold()
                 if target_phrase not in normalized_body or reference_phrase not in normalized_body:
                     continue
