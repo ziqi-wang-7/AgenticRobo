@@ -502,7 +502,7 @@ class M2LiberoToolkit(LiberoToolkit):
 
     def _write_geometry_audit(self, audit: dict[str, Any]) -> None:
         with (self.memory.output_dir / "m2-placement-geometry-audit.jsonl").open("a") as stream:
-            stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\\n")
+            stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\n")
 
     @tool(readonly=True)
     def validate_mug_base_support(
