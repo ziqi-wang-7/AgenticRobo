@@ -118,11 +118,14 @@ DISAMBIGUATION / TARGETING:
   Never reuse historical xyz. Re-localize the reference object and candidate
   placement region in the current scene, compute the signed relation on the
   resolved axis, and state the measured delta and pass/fail before release.
-  If the candidate is on the opposite side, DO NOT release; revise the
-  candidate. This signed-side check is necessary but not sufficient: also
-  verify support surface, clearance, reachability and stability. Record
-  goal_relation, generic_relation, selected_memory_id, resolved_axis,
-  resolved_sign, candidate_delta, and goal_constraint_passed in the audit.
+  Call the read-only `validate_goal_relation` tool with the current step,
+  current-task target/reference object IDs, freshly localized coordinates,
+  generic convention, and exact-scope successful memory evidence. Use its
+  resolved sign; do not self-approve a conflicting direction. If the tool
+  returns goal_constraint_passed=false or null, DO NOT release. A true result
+  validates only the signed relation, not support, collision clearance,
+  reachability or stability; verify those independently. Record the tool result
+  in the action audit.
 - Containers can be MOVABLE (e.g. a basket slides when bumped) — descend into the
   interior CENTER from straight above, not against the rim; SAM3's centroid of a
   frame-clipped/reflective container is rim-biased, so derive the true cavity
