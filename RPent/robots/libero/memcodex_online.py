@@ -558,6 +558,17 @@ class M2LiberoToolkit(LiberoToolkit):
                 "mug_object_id": mug_object_id,
                 "plate_object_id": plate_object_id,
                 "evidence_ids": ids,
+                "evidence": [
+                    {
+                        "id": item["id"],
+                        "step": item["step"],
+                        "camera": item["camera"],
+                        "tool": item["tool"],
+                        "source_artifact": item["source_artifact"],
+                        "xyz": item["xyz"],
+                    }
+                    for item in evidence
+                ],
                 **result,
                 "native_on_verified": False,
             }
@@ -621,6 +632,17 @@ class M2LiberoToolkit(LiberoToolkit):
                     *moving_object_boundary_evidence_ids,
                 ],
                 "evidence_ids": ids,
+                "evidence": [
+                    {
+                        "id": item["id"],
+                        "step": item["step"],
+                        "camera": item["camera"],
+                        "tool": item["tool"],
+                        "source_artifact": item["source_artifact"],
+                        "xyz": item["xyz"],
+                    }
+                    for item in evidence
+                ],
                 "path_xyz": path_xyz,
                 **result,
             }
