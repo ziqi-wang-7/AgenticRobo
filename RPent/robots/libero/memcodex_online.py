@@ -413,25 +413,38 @@ class M2LiberoToolkit(LiberoToolkit):
                     continue
                 entry = self.memory.controller.indexed.read(metadata)
                 body = entry.text
-                frontmatter = body.split("---", 2)[1] if body.startswith("---") else ""
-                if not (
-                    f"task_id: {task_id}" in frontmatter
-                    and "solved_seeds:" in frontmatter
-                    and "attempts:" in frontmatter
-                ):
-                    continue
-                # Require the source's own frontmatter scope to match; the
-                # filename alone is not accepted as a success certificate.
-                source_regime = "swap" if "regime: swap" in frontmatter else "task"
-                if (
-                    "suite: libero10" not in frontmatter
-                    or f"regime: {source_regime}" not in frontmatter
-                    or suite.replace("libero_10_", "") != source_regime
-                ):
+                # The extractive converter strips source Markdown frontmatter
+                # and prepends an applicability preamble. Therefore frontmatter
+                # parsing entry.text is invalid. Bind scope from the immutable
+                # indexed source_ref and use the archived Raw body as evidence.
+                expected_source = (
+                    f"task-family/task-family_libero10_{suite.replace('libero_10_', '')}_t{task_id}.md"
+                )
+                matching_refs = [
+                    source_ref.split("#", 1)[0]
+                    for source_ref in metadata.get("source_refs", ())
+                    if source_ref.split("#", 1)[0] == expected_source
+                ]
+                if not matching_refs or metadata.get("layer") != "raw":
                     continue
                 normalized_body = " ".join(
                     body.casefold().replace("-", " ").replace("_", " ").split()
                 )
+                # Task-family Raw entries are curated source archives. Require
+                # an explicit successful-outcome statement in the delivered
+                # body; a matching filename alone is not enough.
+                successful_outcome = any(
+                    marker in normalized_body
+                    for marker in (
+                        "worked cleanly",
+                        "success:",
+                        "predicate fired",
+                        "solved successfully",
+                        "successful placement",
+                    )
+                )
+                if not successful_outcome:
+                    continue
                 target_phrase = re.sub(
                     r"_?\d+$", "", target_object.replace("_", " ")
                 ).casefold()
