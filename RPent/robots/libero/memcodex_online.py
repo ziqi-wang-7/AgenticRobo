@@ -354,7 +354,10 @@ class M2LiberoToolkit(LiberoToolkit):
         self.add_tool(self.validate_mug_base_support)
         self.add_tool(self.validate_object_path_clearance)
         schema_audit = validate_identity_tool_schema(self._tools["retrieve_memory"])
-        schema_audit["contract"] = "M2.3.2-evidence-bound-goal-resolver"
+        schema_audit["contract"] = "M2.3.2.3-placement-reliability"
+        schema_audit["placement_geometry_audit_file"] = (
+            "m2-placement-geometry-audit.jsonl"
+        )
         schema_audit["source_revision"] = SOURCE_REVISION
         schema_audit["goal_relation_tool_registered"] = (
             "validate_goal_relation" in self._tools
