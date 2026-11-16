@@ -670,6 +670,8 @@ def test_goal_memory_conflict_resolver_tool_is_registered(action_run):
         schema["properties"]
     )
     assert {"target_xyz", "reference_xyz"} <= set(schema["properties"])
+    assert "memory_successful" not in schema["properties"]
+    assert "memory_sign" not in schema["properties"]
 
 
 def test_action_evidence_flag_requires_m2_and_changes_only_opted_in_prompt(
