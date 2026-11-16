@@ -131,3 +131,41 @@ def test_candidate_relation_uses_fresh_coordinates_not_memory_coordinates():
         reference_coordinate=-0.02,
         minimum_separation=0.02,
     ) is False
+
+def test_missing_exact_task_memory_without_generic_fallback_fails_closed():
+    resolution = resolve_relation(
+        scope=_scope(),
+        relation="right_of",
+        generic=None,
+        memories=[],
+    )
+    assert resolution.source == "unresolved"
+    assert resolution.source_id is None
+    assert validate_candidate_relation(
+        resolution=resolution,
+        target_coordinate=-0.11,
+        reference_coordinate=0.02,
+    ) is None
+
+
+def test_unsuccessful_exact_task_memory_cannot_override_generic():
+    unsuccessful = RelationEvidence(
+        relation="right_of",
+        axis="y",
+        sign=1,
+        suite="libero_10_swap",
+        task_id=6,
+        target_object="chocolate_pudding",
+        reference_object="plate",
+        successful=False,
+        source_id="unverified-swap-t6",
+    )
+    resolution = resolve_relation(
+        scope=_scope(),
+        relation="right_of",
+        generic=None,
+        memories=[unsuccessful],
+    )
+    assert resolution.source == "unresolved"
+    assert resolution.source_id is None
+
