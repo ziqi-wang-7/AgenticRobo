@@ -44,6 +44,7 @@ from robots.libero.skill_abstraction import infer_skill_context
 from robots.libero.goal_memory_resolver import (
     RelationEvidence,
     TaskScope,
+    task_family_relation_evidence,
     resolve_relation,
     validate_candidate_relation,
 )
@@ -402,95 +403,18 @@ class M2LiberoToolkit(LiberoToolkit):
             for metadata in indexed_entries.values():
                 if metadata.get("key") not in seen_ids:
                     continue
-                source_refs = " ".join(metadata.get("source_refs", ()))
-                if not any(
-                    name in source_refs
-                    for name in (
-                        f"task-family_libero10_swap_t{task_id}.md",
-                        f"task-family_libero10_task_t{task_id}.md",
-                    )
-                ):
-                    continue
                 entry = self.memory.controller.indexed.read(metadata)
-                body = entry.text
-                # The extractive converter strips source Markdown frontmatter
-                # and prepends an applicability preamble. Therefore frontmatter
-                # parsing entry.text is invalid. Bind scope from the immutable
-                # indexed source_ref and use the archived Raw body as evidence.
-                expected_source = (
-                    f"task-family/task-family_libero10_{suite.replace('libero_10_', '')}_t{task_id}.md"
-                )
-                matching_refs = [
-                    source_ref.split("#", 1)[0]
-                    for source_ref in metadata.get("source_refs", ())
-                    if source_ref.split("#", 1)[0] == expected_source
-                ]
-                if not matching_refs or metadata.get("layer") != "raw":
-                    continue
-                normalized_body = " ".join(
-                    body.casefold().replace("-", " ").replace("_", " ").split()
-                )
-                # Task-family Raw entries are curated source archives. Require
-                # an explicit successful-outcome statement in the delivered
-                # body; a matching filename alone is not enough.
-                successful_outcome = any(
-                    marker in normalized_body
-                    for marker in (
-                        "worked cleanly",
-                        "success:",
-                        "predicate fired",
-                        "solved successfully",
-                        "successful placement",
-                    )
-                )
-                if not successful_outcome:
-                    continue
-                target_phrase = re.sub(
-                    r"_?\d+$", "", target_object.replace("_", " ")
-                ).casefold()
-                reference_phrase = re.sub(
-                    r"_?\d+$", "", reference_object.replace("_", " ")
-                ).casefold()
-                if target_phrase not in normalized_body or reference_phrase not in normalized_body:
-                    continue
-                relation_phrase = {
-                    "right_of": ("right of the plate", "right-of"),
-                    "left_of": ("left of the plate", "left-of"),
-                    "front_of": ("front of the plate", "front-of"),
-                    "behind": ("behind the plate",),
-                }.get(relation, ())
-                if not any(phrase in normalized_body for phrase in relation_phrase):
-                    continue
-                axis = None
-                sign = None
-                source_text = body.casefold()
-                if relation == "right_of" and (
-                    "+y (image-right)" in source_text
-                    or "right of the plate = +y" in source_text
-                    or "right side = +y" in source_text
-                ):
-                    axis, sign = "y", 1
-                elif relation == "right_of" and "right of the plate = -y" in source_text:
-                    axis, sign = "y", -1
-                if axis is None:
-                    continue
-                solved = "solved_seeds:" in frontmatter and not re.search(
-                    r"solved_seeds:\s*\[\s*\]", frontmatter
-                )
-                if not solved:
-                    continue
-                source_regime = suite.replace("libero_10_", "")
-                evidence.append(RelationEvidence(
-                    relation=relation,
-                    axis=axis,
-                    sign=sign,
-                    suite=f"libero10/{source_regime}",
+                item = task_family_relation_evidence(
+                    metadata=metadata,
+                    body=entry.text,
+                    suite=suite,
                     task_id=task_id,
                     target_object=target_object,
                     reference_object=reference_object,
-                    successful=True,
-                    source_id=metadata["key"],
-                ))
+                    relation=relation,
+                )
+                if item is not None:
+                    evidence.append(item)
             current_scope_suite = f"libero10/{suite.replace('libero_10_', '')}"
             generic = (
                 (generic_axis, generic_sign)
