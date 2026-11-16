@@ -417,7 +417,13 @@ class M2LiberoToolkit(LiberoToolkit):
                 source_regime = "swap" if "libero10_swap" in source_refs else "task"
                 if suite.replace("libero_10_", "") != source_regime:
                     continue
-                normalized_body = " ".join(body.casefold().split())
+                normalized_body = " ".join(
+                    body.casefold().replace("-", " ").replace("_", " ").split()
+                )
+                target_phrase = target_object.replace("_", " ").casefold()
+                reference_phrase = reference_object.replace("_", " ").casefold()
+                if target_phrase not in normalized_body or reference_phrase not in normalized_body:
+                    continue
                 relation_phrase = {
                     "right_of": ("right of the plate", "right-of"),
                     "left_of": ("left of the plate", "left-of"),
