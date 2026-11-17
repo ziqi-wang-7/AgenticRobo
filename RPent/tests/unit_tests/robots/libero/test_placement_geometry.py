@@ -89,3 +89,48 @@ def test_object_path_clearance_detects_nearby_mug_collision():
 def test_geometry_rejects_insufficient_boundary_samples():
     with pytest.raises(ValueError, match="at least three"):
         estimate_xy_radius([0.0, 0.0, 0.0], [[0.1, 0.0, 0.0]])
+
+
+def test_support_footprint_rejects_large_base_height_mismatch():
+    result = validate_support_footprint(
+        object_base_xyz=[0.0, 0.0, 0.5693],
+        support_center_xyz=[0.0, 0.0, 0.4438],
+        object_boundary_xyz=[
+            [0.025, 0.0, 0.5693],
+            [-0.025, 0.0, 0.5693],
+            [0.0, 0.025, 0.5693],
+            [0.0, -0.025, 0.5693],
+        ],
+        support_boundary_xyz=[
+            [0.10, 0.0, 0.4438],
+            [-0.10, 0.0, 0.4438],
+            [0.0, 0.10, 0.4438],
+            [0.0, -0.10, 0.4438],
+        ],
+        max_height_delta_m=0.012,
+    )
+    assert result["xy_footprint_valid"] is True
+    assert result["base_height_consistent"] is False
+    assert result["placement_geometry_valid"] is False
+
+
+def test_support_footprint_accepts_consistent_base_height():
+    result = validate_support_footprint(
+        object_base_xyz=[0.0, 0.0, 0.450],
+        support_center_xyz=[0.0, 0.0, 0.444],
+        object_boundary_xyz=[
+            [0.025, 0.0, 0.450],
+            [-0.025, 0.0, 0.450],
+            [0.0, 0.025, 0.450],
+            [0.0, -0.025, 0.450],
+        ],
+        support_boundary_xyz=[
+            [0.10, 0.0, 0.444],
+            [-0.10, 0.0, 0.444],
+            [0.0, 0.10, 0.444],
+            [0.0, -0.10, 0.444],
+        ],
+        max_height_delta_m=0.012,
+    )
+    assert result["placement_geometry_valid"] is True
+
