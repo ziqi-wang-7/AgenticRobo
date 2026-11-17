@@ -174,6 +174,7 @@ def validate_identity_tool_schema(declaration: Any) -> dict[str, Any]:
         "goal_relation_audit_file": "m2-goal-relation-audit.jsonl",
         "placement_geometry_tools": [
             "validate_mug_base_support",
+            "validate_object_support",
             "validate_object_path_clearance",
         ],
         "skill_specific_recovery_controller": True,
@@ -354,6 +355,7 @@ class M2LiberoToolkit(LiberoToolkit):
         self.add_tool(self._retrieval_tool())
         self.add_tool(self.validate_goal_relation)
         self.add_tool(self.validate_mug_base_support)
+        self.add_tool(self.validate_object_support)
         self.add_tool(self.validate_object_path_clearance)
         self.add_tool(self.route_goal_predicate)
         self.add_tool(self.validate_container_containment)
@@ -587,6 +589,65 @@ class M2LiberoToolkit(LiberoToolkit):
     def _write_geometry_audit(self, audit: dict[str, Any]) -> None:
         with (self.memory.output_dir / "m2-placement-geometry-audit.jsonl").open("a") as stream:
             stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\n")
+
+    @tool(readonly=True)
+    def validate_object_support(
+        self,
+        step: int,
+        object_id: str,
+        support_id: str,
+        object_base_center_evidence_id: str,
+        object_base_boundary_evidence_ids: list[str],
+        support_center_evidence_id: str,
+        support_boundary_evidence_ids: list[str],
+        edge_margin_m: float = 0.005,
+        max_height_delta_m: float = 0.012,
+    ) -> ToolResult:
+        """Validate current object-base footprint and height against a support.
+
+        Use for BDDL On(object, support), including moka-pot-on-stove. The
+        samples must represent the object's base and the usable support surface.
+        A pass is only geometric screening, not proof of native On().
+        """
+        with self._memory_lock:
+            record = self._state.latest_record()
+            if step != record.step_idx:
+                raise ValueError(f"Stale support check; latest step is {record.step_idx}")
+            profile = self.memory.controller.indexed.profile(self.memory.record["task"])
+            task_objects = set(profile["required_objects"]) | set(profile.get("context_objects", ()))
+            if object_id not in task_objects or support_id not in task_objects:
+                raise ValueError("Object and support must belong to the current task")
+            ids = [
+                object_base_center_evidence_id,
+                *object_base_boundary_evidence_ids,
+                support_center_evidence_id,
+                *support_boundary_evidence_ids,
+            ]
+            evidence = self._current_geometry_evidence(step, ids)
+            by_id = {item["id"]: item for item in evidence}
+            result = validate_support_footprint(
+                object_base_xyz=by_id[object_base_center_evidence_id]["xyz"],
+                support_center_xyz=by_id[support_center_evidence_id]["xyz"],
+                object_boundary_xyz=[
+                    by_id[key]["xyz"] for key in object_base_boundary_evidence_ids
+                ],
+                support_boundary_xyz=[
+                    by_id[key]["xyz"] for key in support_boundary_evidence_ids
+                ],
+                edge_margin_m=edge_margin_m,
+                max_height_delta_m=max_height_delta_m,
+            )
+            audit = {
+                "check": "object_support",
+                "step": step,
+                "object_id": object_id,
+                "support_id": support_id,
+                "evidence_ids": ids,
+                **result,
+                "native_on_verified": False,
+            }
+            self._write_geometry_audit(audit)
+            return ToolResult(data=audit)
 
     @tool(readonly=True)
     def validate_mug_base_support(
