@@ -666,6 +666,7 @@ def test_incremental_memory_delivery_omits_only_explicitly_retained_bodies(actio
 def test_placement_geometry_validators_are_registered(action_run):
     kit, _, _ = action_run
     assert "validate_mug_base_support" in kit._tools
+    assert "validate_object_support" in kit._tools
     assert "validate_object_path_clearance" in kit._tools
     support_schema = kit._tools["validate_mug_base_support"].input_schema
     assert {
