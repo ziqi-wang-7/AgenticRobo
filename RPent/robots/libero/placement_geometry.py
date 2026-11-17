@@ -48,6 +48,7 @@ def validate_support_footprint(
     object_boundary_xyz: Sequence[Sequence[float]],
     support_boundary_xyz: Sequence[Sequence[float]],
     edge_margin_m: float = 0.005,
+    max_height_delta_m: float = 0.012,
 ) -> dict:
     """Check whether the measured object-base footprint fits inside support.
 
@@ -57,25 +58,35 @@ def validate_support_footprint(
     """
     if not math.isfinite(edge_margin_m) or edge_margin_m < 0:
         raise ValueError("edge_margin_m must be finite and non-negative")
+    if not math.isfinite(max_height_delta_m) or max_height_delta_m <= 0:
+        raise ValueError("max_height_delta_m must be positive and finite")
     ox, oy = _xy(object_base_xyz)
     sx, sy = _xy(support_center_xyz)
     object_radius = estimate_xy_radius(object_base_xyz, object_boundary_xyz)
     support_radius = estimate_xy_radius(support_center_xyz, support_boundary_xyz)
     center_offset = math.hypot(ox - sx, oy - sy)
     required = center_offset + object_radius + edge_margin_m
+    height_delta = abs(float(object_base_xyz[2]) - float(support_center_xyz[2]))
+    xy_valid = required <= support_radius
+    height_valid = height_delta <= max_height_delta_m
     return {
         "object_base_xyz": list(map(float, object_base_xyz)),
         "support_center_xyz": list(map(float, support_center_xyz)),
         "base_to_support_z_delta_m": float(object_base_xyz[2]) - float(support_center_xyz[2]),
+        "absolute_base_height_delta_m": height_delta,
+        "max_height_delta_m": max_height_delta_m,
+        "xy_footprint_valid": xy_valid,
+        "base_height_consistent": height_valid,
+        "placement_geometry_valid": xy_valid and height_valid,
         "object_radius_m": object_radius,
         "support_radius_m": support_radius,
         "center_offset_m": center_offset,
         "edge_margin_m": edge_margin_m,
         "required_support_radius_m": required,
-        "footprint_inside_support": required <= support_radius,
+        "footprint_inside_support": xy_valid,
         "check_type": "conservative_xy_circle",
         "limitations": [
-            "does_not_verify_vertical_contact",
+            "height_consistency_is_only_a_screen_not_contact_proof",
             "does_not_verify_object_uprightness",
             "does_not_verify_native_bddl_predicate",
         ],
