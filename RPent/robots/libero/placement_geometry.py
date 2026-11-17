@@ -146,3 +146,51 @@ def _xy3(point: Sequence[float]) -> tuple[float, float, float]:
     if len(point) != 3 or not all(math.isfinite(float(v)) for v in point):
         raise ValueError("geometry points must be finite xyz vectors")
     return float(point[0]), float(point[1]), float(point[2])
+
+
+def validate_containment_aabb(
+    *,
+    object_boundary_xyz: Sequence[Sequence[float]],
+    interior_boundary_xyz: Sequence[Sequence[float]],
+    clearance_margin_m: float = 0.003,
+) -> dict:
+    """Check whether current object boundary samples fit inside a container AABB.
+
+    This is a conservative geometric screen only. It does not prove the object
+    crossed the opening, is supported, or satisfies the simulator's native In().
+    Interior samples must describe the actual usable cavity, not the outer shell.
+    """
+    if len(object_boundary_xyz) < 4 or len(interior_boundary_xyz) < 4:
+        raise ValueError("containment requires at least four object and interior samples")
+    if not math.isfinite(clearance_margin_m) or clearance_margin_m < 0:
+        raise ValueError("clearance_margin_m must be finite and non-negative")
+    obj = [_xy3(point) for point in object_boundary_xyz]
+    interior = [_xy3(point) for point in interior_boundary_xyz]
+    obj_min = [min(point[i] for point in obj) for i in range(3)]
+    obj_max = [max(point[i] for point in obj) for i in range(3)]
+    cavity_min = [min(point[i] for point in interior) for i in range(3)]
+    cavity_max = [max(point[i] for point in interior) for i in range(3)]
+    margins = [
+        min(obj_min[i] - cavity_min[i], cavity_max[i] - obj_max[i])
+        for i in range(3)
+    ]
+    contained = all(
+        obj_min[i] >= cavity_min[i] + clearance_margin_m
+        and obj_max[i] <= cavity_max[i] - clearance_margin_m
+        for i in range(3)
+    )
+    return {
+        "object_min_xyz": obj_min,
+        "object_max_xyz": obj_max,
+        "interior_min_xyz": cavity_min,
+        "interior_max_xyz": cavity_max,
+        "axis_clearance_m": margins,
+        "clearance_margin_m": clearance_margin_m,
+        "geometric_containment": contained,
+        "check_type": "sampled_axis_aligned_interior_bounds",
+        "limitations": [
+            "does_not_verify_path_through_opening",
+            "does_not_verify_door_state",
+            "does_not_verify_native_bddl_in_predicate",
+        ],
+    }
