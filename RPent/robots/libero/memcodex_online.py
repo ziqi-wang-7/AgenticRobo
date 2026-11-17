@@ -358,7 +358,13 @@ class M2LiberoToolkit(LiberoToolkit):
         self.add_tool(self.route_goal_predicate)
         self.add_tool(self.validate_container_containment)
         schema_audit = validate_identity_tool_schema(self._tools["retrieve_memory"])
-        schema_audit["contract"] = "M2.3.2.3-placement-reliability"
+        schema_audit["contract"] = "M2.3.2.5-bddl-predicate-routing"
+        schema_audit["goal_predicate_router_registered"] = (
+            "route_goal_predicate" in self._tools
+        )
+        schema_audit["containment_validator_registered"] = (
+            "validate_container_containment" in self._tools
+        )
         schema_audit["placement_geometry_audit_file"] = (
             "m2-placement-geometry-audit.jsonl"
         )
@@ -593,6 +599,7 @@ class M2LiberoToolkit(LiberoToolkit):
         plate_center_evidence_id: str,
         plate_boundary_evidence_ids: list[str],
         edge_margin_m: float = 0.005,
+        max_height_delta_m: float = 0.012,
     ) -> ToolResult:
         """Check current-scene mug-base footprint against the plate support area.
 
@@ -626,6 +633,7 @@ class M2LiberoToolkit(LiberoToolkit):
                     by_id[key]["xyz"] for key in plate_boundary_evidence_ids
                 ],
                 edge_margin_m=edge_margin_m,
+                max_height_delta_m=max_height_delta_m,
             )
             audit = {
                 "check": "mug_base_support",
@@ -646,6 +654,11 @@ class M2LiberoToolkit(LiberoToolkit):
                 ],
                 **result,
                 "native_on_verified": False,
+                "support_release_recommendation": (
+                    "geometry_screen_passed"
+                    if result["placement_geometry_valid"]
+                    else "relocalize_or_reposition"
+                ),
             }
             self._write_geometry_audit(audit)
             return ToolResult(data=audit)
