@@ -12,6 +12,7 @@ from robots.libero.placement_geometry import (
     estimate_xy_radius,
     validate_object_path_clearance,
     validate_support_footprint,
+    validate_containment_aabb,
 )
 
 
@@ -133,4 +134,43 @@ def test_support_footprint_accepts_consistent_base_height():
         max_height_delta_m=0.012,
     )
     assert result["placement_geometry_valid"] is True
+
+
+def test_container_containment_accepts_object_inside_sampled_cavity():
+    result = validate_containment_aabb(
+        object_boundary_xyz=[
+            [0.02, 0.02, 0.52],
+            [0.04, 0.02, 0.52],
+            [0.02, 0.04, 0.54],
+            [0.04, 0.04, 0.54],
+        ],
+        interior_boundary_xyz=[
+            [0.0, 0.0, 0.50],
+            [0.10, 0.0, 0.50],
+            [0.0, 0.10, 0.60],
+            [0.10, 0.10, 0.60],
+        ],
+        clearance_margin_m=0.003,
+    )
+    assert result["geometric_containment"] is True
+    assert "does_not_verify_native_bddl_in_predicate" in result["limitations"]
+
+
+def test_container_containment_rejects_object_outside_cavity():
+    result = validate_containment_aabb(
+        object_boundary_xyz=[
+            [0.08, 0.02, 0.52],
+            [0.12, 0.02, 0.52],
+            [0.08, 0.04, 0.54],
+            [0.12, 0.04, 0.54],
+        ],
+        interior_boundary_xyz=[
+            [0.0, 0.0, 0.50],
+            [0.10, 0.0, 0.50],
+            [0.0, 0.10, 0.60],
+            [0.10, 0.10, 0.60],
+        ],
+        clearance_margin_m=0.003,
+    )
+    assert result["geometric_containment"] is False
 
