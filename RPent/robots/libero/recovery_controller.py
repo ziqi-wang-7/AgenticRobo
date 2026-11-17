@@ -82,32 +82,51 @@ def select_recovery_plan(
             active_skill=active_skill,
             compatible_skills=compatible,
         )
-    if kinds & {"insertion_blocked", "release_stuck", "contact_stalled"}:
+    if kinds & {
+        "insertion_blocked",
+        "release_stuck",
+        "contact_stalled",
+        "pose_control_diverged",
+        "door_close_failed",
+    }:
         return RecoveryPlan(
             "contact",
             (
-                "PRE_ALIGN",
-                "VERIFY_ORIENTATION",
-                "APPROACH_OPENING",
-                "VERIFY_CONTACT",
-                "SHORT_PUSH",
-                "VERIFY_INSERTION_DEPTH",
+                "VERIFY_CURRENT_GRASP_AND_OBJECT_POSE",
+                "PLAN_SMALL_POSE_TRANSITION",
+                "VERIFY_GRIPPER_HOLD_AFTER_TRANSITION",
+                "PRE_ALIGN_OUTSIDE_OPENING",
+                "APPROACH_OPENING_IN_SHORT_SEGMENTS",
+                "VERIFY_CONTACT_AND_IK_PROGRESS",
+                "INSERT_IN_SHORT_SEGMENTS",
+                "VERIFY_INTERIOR_CONTAINMENT",
+                "RELEASE_ONLY_AFTER_SUPPORT_CHECK",
+                "VERIFY_NATIVE_IN_PREDICATE",
+                "CLOSE_DOOR_ONLY_AFTER_OBJECTS_SECURED",
+                "VERIFY_DOOR_CLOSED",
                 "RELOCALIZE_OR_STOP",
             ),
             "contact_or_insertion_failure",
             active_skill=active_skill,
             compatible_skills=compatible,
         )
-    if kinds & {"wrong_spatial_relation", "placement_not_satisfied", "object_collision"}:
+    if kinds & {
+        "wrong_spatial_relation",
+        "placement_not_satisfied",
+        "object_collision",
+        "support_not_established",
+        "goal_predicate_unsatisfied",
+    }:
         return RecoveryPlan(
             "spatial",
             (
-                "INSPECT_CURRENT_RELATION",
-                "CHECK_DIRECT_CORRECTION_FEASIBILITY",
+                "REOBSERVE_TARGET_AND_SUPPORT_SURFACE",
+                "ROUTE_BDDL_PREDICATE_TO_MATCHING_VALIDATOR",
+                "CHECK_SUPPORT_OR_SPATIAL_GEOMETRY",
                 "CHECK_SWEPT_PATH_AND_CLEARANCE",
-                "SELECT_DIRECT_CORRECTION_OR_REGRASP",
-                "RELOCALIZE",
-                "VERIFY_PLACEMENT",
+                "SELECT_SMALL_CORRECTION_OR_REGRASP",
+                "RELOCALIZE_AFTER_EACH_CORRECTION",
+                "VERIFY_NATIVE_GOAL_PREDICATE",
             ),
             "spatial_relation_or_collision_failure",
             active_skill=active_skill,
