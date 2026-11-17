@@ -89,7 +89,9 @@ def test_non_drawer_runtime_tool_publishes_identity_schema(action_run):
     audit = json.loads(
         (config.output_dir / "m2-runtime-tool-schema.json").read_text()
     )
-    assert audit["contract"] == "M2.3.2.3-placement-reliability"
+    assert audit["contract"] == "M2.3.2.5-bddl-predicate-routing"
+    assert audit["goal_predicate_router_registered"] is True
+    assert audit["containment_validator_registered"] is True
     assert audit["identity_fact_supported"] is True
     assert audit["multi_failure_supported"] is True
     assert audit["incremental_delivery_supported"] is True
@@ -681,6 +683,24 @@ def test_placement_geometry_validators_are_registered(action_run):
         "moving_object_center_evidence_id",
         "moving_object_boundary_evidence_ids",
     } <= set(clearance_schema["properties"])
+
+
+def test_bddl_predicate_router_and_containment_tool_are_registered(action_run):
+    kit, _, _ = action_run
+    assert "route_goal_predicate" in kit._tools
+    assert "validate_container_containment" in kit._tools
+    route = kit._tools["route_goal_predicate"](predicate="On")
+    assert route.data["validator"] == "support"
+    route = kit._tools["route_goal_predicate"](predicate="In")
+    assert route.data["validator"] == "containment"
+    containment_schema = kit._tools["validate_container_containment"].input_schema
+    assert {
+        "step",
+        "object_id",
+        "container_id",
+        "object_boundary_evidence_ids",
+        "interior_boundary_evidence_ids",
+    } <= set(containment_schema["properties"])
 
 
 def test_goal_memory_conflict_resolver_tool_is_registered(action_run):
