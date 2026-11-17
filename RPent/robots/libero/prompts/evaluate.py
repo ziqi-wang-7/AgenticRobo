@@ -50,6 +50,61 @@ memory — it carries the WHY, the parameter ranges, and the
 failure modes you need to adapt the recipe to this seed. A recipe read without
 its memory is half the picture; consult BOTH before planning.
 
+BDDL PREDICATE ROUTING (mandatory before choosing a validator):
+- Parse the actual BDDL predicate, not an English paraphrase. Call
+  `route_goal_predicate` when the predicate type is unclear.
+- `On(object, support)` is a SUPPORT predicate. Never pass it to
+  `validate_goal_relation` as `above`; above is not On. Localize the object's
+  BASE and the usable support surface, use `validate_mug_base_support` for
+  mug-on-plate or the corresponding support geometry check, then independently
+  verify vertical contact/uprightness and the environment's native On result.
+  A horizontal footprint check alone never authorizes a claim of On().
+- `In(object, container)` is a CONTAINMENT predicate. It is not a directional
+  relation and must not be checked with `validate_goal_relation`. Localize the
+  actual inner cavity (not the microwave outer shell), the object's current
+  boundary and opening. Use `validate_container_containment` as a geometric
+  screen, while separately checking the path through the opening, door state,
+  support and native In() predicate.
+- Only predicates such as left_of/right_of/front_of/behind use
+  `validate_goal_relation`. Do not call it for On or In.
+
+TASK 8 — MOKA POTS ON STOVE:
+- Treat each pot placement as On(pot, stove), not Above(pot, stove). Never let
+  the spatial-relation resolver block a support placement. Before releasing,
+  localize the pot base and the stove's usable support region in the current
+  scene; check the base footprint, height/contact evidence, pot stability and
+  clearance from the second pot/knobs. Re-localize the stove for each seed.
+- Grasp the handle using current visual geometry. After the grasp, perform a
+  short lift and verify that the pot follows and remains held; do not trust
+  Pi0's success boolean alone. Re-measure the held-pot offset after every pick.
+  Keep the gripper closed throughout transport. If the handle grasp is weak,
+  stop and re-observe/re-grasp from a changed approach rather than carrying
+  with uncertain holding evidence.
+- Place the first pot only when the support region and approach are clear.
+  Retreat along a collision-free path, then re-localize the stove and second
+  pot before planning the second placement. Verify both On predicates natively.
+
+TASK 9 — TWO MUGS IN MICROWAVE, THEN CLOSE:
+- Treat In(mug, microwave) as CONTAINMENT, never as Above or a generic
+  right/left relation. Inspect the microwave opening, door swing and usable
+  interior separately. Localize the inner cavity, not the exterior front panel.
+- Use a staged insertion state machine: (1) identify and verify mug/handle,
+  (2) grasp and short-lift verify, (3) stabilize the held orientation with
+  small pose changes outside the opening, (4) align to the opening, (5) approach
+  in short segments while checking IK progress and grip, (6) insert in short
+  segments, (7) verify interior containment and support, (8) release only when
+  stable, (9) repeat for the second mug, (10) close the door only after both
+  mugs are secured, then verify the closed state and native task success.
+- Do not issue a large yaw/pitch rotation while close to the microwave opening
+  or while the grasp is unverified. After every pose transition, inspect the
+  wrist image and verify the mug still follows the gripper. If servo residual
+  grows or pitch/yaw collapses, stop that transition, re-localize, and choose
+  a different small-step approach; do not repeat the same pose command.
+- If the mug slips or tips, classify the observed failure (object_slipped,
+  object_tipped, grasp_not_closed or pose_control_diverged) from a current
+  image. Re-grasp only after confirming the handle/side grasp geometry is
+  reachable. Never attempt door closure while either mug is unsecured.
+
 PLACEMENT GEOMETRY AND CLEARANCE (mandatory for mug-on-plate followed by a nearby-object transfer):
 - Do not infer mug support from the mug BODY center or a visually overlapping mask.
   Before final mug placement, localize the actual mug BASE CENTER and at least
@@ -215,7 +270,8 @@ tools. Do not start, stop, restart, or otherwise manage `env_server.py`.
   `set_gripper`, `rotate_wrist`, `rotate_pitch`, `move_pose`, `pi0_doubled`,
   `view_env_state`, `view_camera_meta`, `back_project`, `segment`,
   `read_text_file`, `write_text_file`, `list_dir`, `validate_goal_relation`,
-  `validate_mug_base_support`, `validate_object_path_clearance`, `finish`.
+  `validate_mug_base_support`, `validate_object_path_clearance`,
+  `route_goal_predicate`, `validate_container_containment`, `finish`.
 - Under some runtimes these same tools may appear namespaced; call the actual tool
   name shown in your tool list, preserving the same arguments and semantics.
 
