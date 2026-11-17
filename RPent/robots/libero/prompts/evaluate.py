@@ -55,8 +55,9 @@ BDDL PREDICATE ROUTING (mandatory before choosing a validator):
   `route_goal_predicate` when the predicate type is unclear.
 - `On(object, support)` is a SUPPORT predicate. Never pass it to
   `validate_goal_relation` as `above`; above is not On. Localize the object's
-  BASE and the usable support surface, use `validate_mug_base_support` for
-  mug-on-plate or the corresponding support geometry check, then independently
+  BASE and usable support surface; use `validate_object_support` for generic
+  On(object, support), including moka-pot-on-stove, or
+  `validate_mug_base_support` for mug-on-plate, then independently
   verify vertical contact/uprightness and the environment's native On result.
   A horizontal footprint check alone never authorizes a claim of On().
 - `In(object, container)` is a CONTAINMENT predicate. It is not a directional
