@@ -270,8 +270,9 @@ tools. Do not start, stop, restart, or otherwise manage `env_server.py`.
   `set_gripper`, `rotate_wrist`, `rotate_pitch`, `move_pose`, `pi0_doubled`,
   `view_env_state`, `view_camera_meta`, `back_project`, `segment`,
   `read_text_file`, `write_text_file`, `list_dir`, `validate_goal_relation`,
-  `validate_mug_base_support`, `validate_object_path_clearance`,
-  `route_goal_predicate`, `validate_container_containment`, `finish`.
+  `validate_mug_base_support`, `validate_object_support`,
+  `validate_object_path_clearance`, `route_goal_predicate`,
+  `validate_container_containment`, `finish`.
 - Under some runtimes these same tools may appear namespaced; call the actual tool
   name shown in your tool list, preserving the same arguments and semantics.
 
