@@ -51,7 +51,9 @@ from robots.libero.placement_geometry import (
     estimate_xy_radius,
     validate_support_footprint,
     validate_object_path_clearance,
+    validate_containment_aabb,
 )
+from robots.libero.goal_predicate_router import route_goal_predicate
 from robots.libero.recovery_evidence import (
     DrawerProgress,
     FailureObservation,
@@ -353,6 +355,8 @@ class M2LiberoToolkit(LiberoToolkit):
         self.add_tool(self.validate_goal_relation)
         self.add_tool(self.validate_mug_base_support)
         self.add_tool(self.validate_object_path_clearance)
+        self.add_tool(self.route_goal_predicate)
+        self.add_tool(self.validate_container_containment)
         schema_audit = validate_identity_tool_schema(self._tools["retrieve_memory"])
         schema_audit["contract"] = "M2.3.2.3-placement-reliability"
         schema_audit["placement_geometry_audit_file"] = (
@@ -484,6 +488,77 @@ class M2LiberoToolkit(LiberoToolkit):
             }
             with (self.memory.output_dir / "m2-goal-relation-audit.jsonl").open("a") as stream:
                 stream.write(json.dumps(audit, ensure_ascii=False, allow_nan=False) + "\n")
+            return ToolResult(data=audit)
+
+    @tool(readonly=True)
+    def route_goal_predicate(self, predicate: str) -> ToolResult:
+        """Route a BDDL predicate to the validator with matching semantics.
+
+        On -> support, In -> containment, directional predicates -> spatial relation.
+        This prevents using validate_goal_relation for On/In predicates.
+        """
+        route = route_goal_predicate(predicate)
+        return ToolResult(data={
+            "predicate": route.predicate,
+            "validator": route.validator,
+            "required_evidence": list(route.required_evidence),
+            "reason": route.reason,
+        })
+
+    @tool(readonly=True)
+    def validate_container_containment(
+        self,
+        step: int,
+        object_id: str,
+        container_id: str,
+        object_boundary_evidence_ids: list[str],
+        interior_boundary_evidence_ids: list[str],
+        clearance_margin_m: float = 0.003,
+    ) -> ToolResult:
+        """Screen current object bounds against a localized container interior.
+
+        Use current-step back_project samples from the object's visible boundary
+        and the usable inner cavity. This does not certify the native In() predicate.
+        """
+        with self._memory_lock:
+            record = self._state.latest_record()
+            if step != record.step_idx:
+                raise ValueError(f"Stale containment check; latest step is {record.step_idx}")
+            profile = self.memory.controller.indexed.profile(self.memory.record["task"])
+            task_objects = set(profile["required_objects"]) | set(profile.get("context_objects", ()))
+            if object_id not in task_objects or container_id not in task_objects:
+                raise ValueError("Object and container must belong to the current task")
+            ids = [*object_boundary_evidence_ids, *interior_boundary_evidence_ids]
+            evidence = self._current_geometry_evidence(step, ids)
+            by_id = {item["id"]: item for item in evidence}
+            result = validate_containment_aabb(
+                object_boundary_xyz=[
+                    by_id[key]["xyz"] for key in object_boundary_evidence_ids
+                ],
+                interior_boundary_xyz=[
+                    by_id[key]["xyz"] for key in interior_boundary_evidence_ids
+                ],
+                clearance_margin_m=clearance_margin_m,
+            )
+            audit = {
+                "check": "container_containment",
+                "step": step,
+                "object_id": object_id,
+                "container_id": container_id,
+                "evidence_ids": ids,
+                "evidence": [
+                    {
+                        "id": item["id"],
+                        "camera": item["camera"],
+                        "source_artifact": item["source_artifact"],
+                        "xyz": item["xyz"],
+                    }
+                    for item in evidence
+                ],
+                **result,
+                "native_in_verified": False,
+            }
+            self._write_geometry_audit(audit)
             return ToolResult(data=audit)
 
     def _current_geometry_evidence(
