@@ -668,6 +668,14 @@ def test_placement_geometry_validators_are_registered(action_run):
     assert "validate_mug_base_support" in kit._tools
     assert "validate_object_support" in kit._tools
     assert "validate_object_path_clearance" in kit._tools
+    generic_support_schema = kit._tools["validate_object_support"].input_schema
+    assert {
+        "step",
+        "object_id",
+        "support_id",
+        "object_base_center_evidence_id",
+        "support_center_evidence_id",
+    } <= set(generic_support_schema["properties"])
     support_schema = kit._tools["validate_mug_base_support"].input_schema
     assert {
         "step",
