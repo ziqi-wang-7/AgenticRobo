@@ -34,6 +34,11 @@ FailureKind = Literal[
     "release_stuck",
     "placement_not_satisfied",
     "contact_stalled",
+    "support_not_established",
+    "insertion_blocked",
+    "pose_control_diverged",
+    "door_close_failed",
+    "goal_predicate_unsatisfied",
 ]
 
 
