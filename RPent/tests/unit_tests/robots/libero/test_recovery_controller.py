@@ -44,9 +44,10 @@ def test_spatial_failures_route_to_spatial_state_machine():
 def test_contact_failures_route_to_contact_state_machine():
     plan = select_recovery_plan(["insertion_blocked"])
     assert plan.strategy == "contact"
-    assert "VERIFY_CONTACT" in plan.state_machine
-    assert "SHORT_PUSH" in plan.state_machine
-    assert "VERIFY_INSERTION_DEPTH" in plan.state_machine
+    assert "APPROACH_OPENING_IN_SHORT_SEGMENTS" in plan.state_machine
+    assert "VERIFY_GRIPPER_HOLD_AFTER_TRANSITION" in plan.state_machine
+    assert "VERIFY_INTERIOR_CONTAINMENT" in plan.state_machine
+    assert "CLOSE_DOOR_ONLY_AFTER_OBJECTS_SECURED" in plan.state_machine
 
 
 def test_unknown_failure_routes_to_observe_not_guess():
@@ -109,4 +110,24 @@ def test_active_insertion_skill_does_not_relabel_failure_as_task_specific():
     assert plan.strategy == "contact"
     assert plan.active_skill == "insertion"
     assert plan.execution_authorized is False
+
+
+def test_support_failure_routes_to_spatial_support_recovery():
+    plan = select_recovery_plan(["support_not_established"], active_skill="placement")
+    assert plan.strategy == "spatial"
+    assert "ROUTE_BDDL_PREDICATE_TO_MATCHING_VALIDATOR" in plan.state_machine
+    assert "VERIFY_NATIVE_GOAL_PREDICATE" in plan.state_machine
+
+
+def test_pose_divergence_routes_to_staged_insertion_recovery():
+    plan = select_recovery_plan(["pose_control_diverged"], active_skill="insertion")
+    assert plan.strategy == "contact"
+    assert "PLAN_SMALL_POSE_TRANSITION" in plan.state_machine
+    assert "VERIFY_GRIPPER_HOLD_AFTER_TRANSITION" in plan.state_machine
+
+
+def test_door_close_failure_routes_to_contact_workflow():
+    plan = select_recovery_plan(["door_close_failed"], active_skill="contact")
+    assert plan.strategy == "contact"
+    assert "VERIFY_DOOR_CLOSED" in plan.state_machine
 
