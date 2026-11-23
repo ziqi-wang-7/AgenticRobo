@@ -26,6 +26,7 @@ import pytest
 
 from robots.libero.flash.evolve import (
     bootstrap_plan_from_corpus,
+    fold_null_events,
     load_evolving_plan,
     match_recovery_branch,
     patch_plan_with_branch,
@@ -965,3 +966,95 @@ def test_prepare_stream_uses_backend_model_and_unique_episode_ids(
     first, second = plan["episodes"]
     assert first["episode_id"] != second["episode_id"]
     assert "initial_scene" in first and "initial_scene" not in second
+
+
+def test_fold_null_events_removes_retries_stalls_and_fidgets_safely() -> None:
+    def rec(
+        idx: int,
+        cmd: dict[str, Any],
+        result: dict[str, Any] | None = None,
+        terminated: bool = False,
+    ) -> SimpleNamespace:
+        return SimpleNamespace(
+            step_idx=idx,
+            command=cmd,
+            result=result or {"ok": True},
+            terminated=terminated,
+            truncated=False,
+        )
+
+    records = [
+        rec(1, {"action": "move_to", "xyz": [0.10, 0.05, 0.70], "gripper": -1}),
+        rec(
+            2,
+            {"action": "pi0_pick", "prompt": "pick up the bowl"},
+            {"success": False},
+        ),
+        rec(3, {"action": "move_to", "xyz": [0.12, 0.08, 0.70], "gripper": -1}),
+        rec(4, {"action": "move_to", "xyz": [0.25, 0.25, 0.70], "gripper": -1}),
+        rec(5, {"action": "move_to", "xyz": [0.125, 0.085, 0.70], "gripper": -1}),
+        rec(6, {"action": "move_to", "xyz": [0.128, 0.088, 0.70], "gripper": -1}),
+        rec(
+            7,
+            {"action": "pi0_pick", "prompt": "grasp the bowl rim"},
+            {"success": True},
+        ),
+        rec(8, {"action": "set_gripper", "gripper": 1}),
+        rec(
+            9,
+            {
+                "action": "move_to",
+                "xyz": [-0.10, 0.30, 0.70],
+                "gripper": 1,
+                "max_steps": 80,
+                "tol": 0.012,
+            },
+            {"final_dist_m": 0.07, "steps_used": 80},
+        ),
+        rec(10, {"action": "move_pose", "xyz": [-0.10, 0.30, 0.70], "gripper": 1}),
+        rec(11, {"action": "move_pose", "xyz": [-0.10, 0.30, 0.50], "gripper": 1}),
+        rec(12, {"action": "release"}, {"ok": True}, terminated=True),
+        # Anything after termination must be ignored
+        rec(13, {"action": "move_to", "xyz": [0.0, 0.0, 0.75], "gripper": -1}),
+    ]
+
+    kept, steps, folded = fold_null_events(records)
+    assert folded == 6
+    assert steps == [6, 7, 8, 10, 11, 12]
+    assert [c["action"] for c in kept] == [
+        "move_to",
+        "pi0_pick",
+        "set_gripper",
+        "move_pose",
+        "move_pose",
+        "release",
+    ]
+    assert kept[0]["xyz"] == [0.128, 0.088, 0.70]
+
+
+def test_fold_null_events_preserves_contact_skill_pi0_pick() -> None:
+    """Repurposed contact-skill pi0_pick (turn knob / lift_thresh=999) is never dropped."""
+    records = [
+        SimpleNamespace(
+            step_idx=1,
+            command={
+                "action": "pi0_pick",
+                "prompt": "turn on the stove",
+                "lift_thresh": 999,
+            },
+            result={"success": False},
+            terminated=False,
+            truncated=False,
+        ),
+        SimpleNamespace(
+            step_idx=2,
+            command={"action": "release"},
+            result={"ok": True},
+            terminated=True,
+            truncated=False,
+        ),
+    ]
+    kept, steps, folded = fold_null_events(records)
+    assert folded == 0
+    assert steps == [1, 2]
+    assert kept[0]["action"] == "pi0_pick"

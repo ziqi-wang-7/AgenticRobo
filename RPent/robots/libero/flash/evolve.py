@@ -46,6 +46,7 @@ from robots.libero.flash.generate import (
     MOVE_ACTIONS,
     _attach_moves,
     _fallback_anchors,
+    _is_articulation,
     _merge_anchors,
     extract_relations,
     generate_flash_plan,
@@ -349,36 +350,170 @@ def match_recovery_branch(
     return scored[0][1]
 
 
+_POSITIONING_ACTIONS = frozenset(
+    {"move_to", "move_pose", "rotate_wrist", "rotate_pitch"}
+)
+_JITTER_TOL_M = 0.015
+_LOOP_RETURN_TOL_M = 0.02
+
+
+def _is_contact_pick(cmd: Mapping[str, Any]) -> bool:
+    """Return True for repurposed contact-skill pi0_pick calls (e.g. stove knob)."""
+    if _is_articulation(dict(cmd)):
+        return True
+    lift = cmd.get("lift_thresh")
+    return isinstance(lift, (int, float)) and float(lift) >= 1.0
+
+
+def _cmd_gripper(cmd: Mapping[str, Any]) -> int:
+    val = cmd.get("gripper", -1)
+    try:
+        return 1 if float(val) > 0 else -1
+    except (TypeError, ValueError):
+        return -1
+
+
+def _cmd_xyz(cmd: Mapping[str, Any]) -> tuple[float, float, float] | None:
+    xyz = cmd.get("xyz")
+    if (
+        isinstance(xyz, (list, tuple))
+        and len(xyz) == 3
+        and all(isinstance(v, (int, float)) and math.isfinite(v) for v in xyz)
+    ):
+        return (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+    return None
+
+
+def fold_null_events(
+    records: Sequence[Any],
+) -> tuple[list[dict[str, Any]], list[int], int]:
+    """Filter out zero-progress trial-and-error null events before compilation.
+
+    Preserves ``7c3950a`` termination boundaries and interrupted/error guards,
+    while also:
+    1. Preserving repurposed contact-skill ``pi0_pick`` calls (e.g. stove knob
+       with ``lift_thresh >= 1.0`` or articulation verbs).
+    2. Folding orphaned empty-gripper approach moves preceding a failed
+       non-contact ``pi0_pick`` when a subsequent attempt provides fresh setup.
+    3. Folding stalled ``motion_alert`` moves (as before), consecutive
+       micro-jitter moves (< 1.5 cm), and empty-gripper A -> B -> A detours.
+
+    Returns:
+        ``(kept_commands, kept_step_indices, folded_count)``.
+    """
+    raw: list[Any] = []
+    for rec in records:
+        cmd = rec.command
+        if not isinstance(cmd, dict) or cmd.get("action") not in PRIMITIVE_ACTIONS:
+            continue
+        raw.append(rec)
+        if rec.terminated:
+            break
+    if not raw:
+        return [], [], 0
+
+    # Pass 1: drop errors, interrupted calls, non-terminating motion stalls, and
+    # failed non-contact pi0_pick cycles (plus their orphaned empty approach).
+    keep_mask = [True] * len(raw)
+    for idx, rec in enumerate(raw):
+        cmd = rec.command
+        action = cmd.get("action")
+        res = rec.result if isinstance(rec.result, dict) else {}
+        if res.get("error") or res.get("interrupted"):
+            keep_mask[idx] = False
+            continue
+        if not rec.terminated and motion_alert(rec):
+            keep_mask[idx] = False
+            continue
+        if (
+            action == "pi0_pick"
+            and not _is_contact_pick(cmd)
+            and not rec.terminated
+            and res.get("success") is False
+        ):
+            keep_mask[idx] = False
+            has_fresh_setup = False
+            for nxt in raw[idx + 1 :]:
+                nxt_act = nxt.command.get("action")
+                if nxt_act in MOVE_ACTIONS and _cmd_gripper(nxt.command) == -1:
+                    has_fresh_setup = True
+                    break
+                if nxt_act in {"pi0_pick", "pi0_doubled", "set_gripper", "release"}:
+                    break
+            if has_fresh_setup:
+                back = idx - 1
+                while back >= 0 and keep_mask[back]:
+                    b_cmd = raw[back].command
+                    b_act = b_cmd.get("action")
+                    if b_act in _POSITIONING_ACTIONS and _cmd_gripper(b_cmd) == -1:
+                        keep_mask[back] = False
+                        back -= 1
+                    else:
+                        break
+
+    stage1 = [rec for rec, keep in zip(raw, keep_mask) if keep]
+
+    # Pass 2: fold consecutive micro-jitter moves and empty-gripper A->B->A loops.
+    stage2: list[Any] = []
+    for rec in stage1:
+        cmd = rec.command
+        act = cmd.get("action")
+        xyz = _cmd_xyz(cmd)
+        if stage2 and act in MOVE_ACTIONS and xyz is not None:
+            prev_cmd = stage2[-1].command
+            prev_xyz = _cmd_xyz(prev_cmd)
+            if (
+                prev_cmd.get("action") == act
+                and _cmd_gripper(prev_cmd) == _cmd_gripper(cmd)
+                and prev_xyz is not None
+                and math.dist(prev_xyz, xyz) < _JITTER_TOL_M
+            ):
+                stage2[-1] = rec
+                continue
+        if (
+            len(stage2) >= 2
+            and act in MOVE_ACTIONS
+            and _cmd_gripper(cmd) == -1
+            and xyz is not None
+        ):
+            prev1 = stage2[-1].command
+            prev0 = stage2[-2].command
+            xyz0 = _cmd_xyz(prev0)
+            if (
+                prev1.get("action") in MOVE_ACTIONS
+                and prev0.get("action") in MOVE_ACTIONS
+                and _cmd_gripper(prev1) == -1
+                and _cmd_gripper(prev0) == -1
+                and xyz0 is not None
+                and math.dist(xyz0, xyz) < _LOOP_RETURN_TOL_M
+            ):
+                stage2.pop()
+                continue
+        stage2.append(rec)
+
+    commands = [dict(rec.command) for rec in stage2]
+    steps = [int(rec.step_idx) for rec in stage2]
+    folded = len(raw) - len(stage2)
+    return commands, steps, folded
+
+
 def _extract_primitive_commands(
-    state: Any, *, after_step: int = -1
-) -> tuple[list[dict[str, Any]], list[int]]:
+    state: Any, *, after_step: int = -1, fold_nulls: bool = True
+) -> tuple[list[dict[str, Any]], list[int], int]:
     """Extract executed primitive commands from ``EnvState`` after ``after_step``."""
+    sliced = [rec for rec in state.records() if rec.step_idx > after_step]
+    if fold_nulls:
+        return fold_null_events(sliced)
     commands: list[dict[str, Any]] = []
     steps: list[int] = []
-    for record in state.records():
-        if record.step_idx <= after_step:
-            continue
+    for record in sliced:
         cmd = record.command
-        if not isinstance(cmd, dict):
-            continue
-        action = cmd.get("action")
-        result = record.result or {}
-        if (
-            action not in PRIMITIVE_ACTIONS
-            or result.get("error")
-            or result.get("interrupted")
-        ):
-            continue
-        if not record.terminated and (
-            (action == "pi0_pick" and result.get("success") is False)
-            or motion_alert(record)
-        ):
-            continue
-        commands.append(dict(cmd))
-        steps.append(int(record.step_idx))
-        if record.terminated:
-            break
-    return commands, steps
+        if isinstance(cmd, dict) and cmd.get("action") in PRIMITIVE_ACTIONS:
+            commands.append(dict(cmd))
+            steps.append(int(record.step_idx))
+            if record.terminated:
+                break
+    return commands, steps, 0
 
 
 def _live_anchors_as_list(
@@ -423,8 +558,8 @@ def compile_recovery_branch(
     measured_anchors: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
     """Compile post-handover slow-planner recovery steps into a Flash branch."""
-    raw_commands, step_indices = _extract_primitive_commands(
-        state, after_step=handover_step
+    raw_commands, step_indices, folded_nulls = _extract_primitive_commands(
+        state, after_step=handover_step, fold_nulls=True
     )
     if not raw_commands:
         return None
@@ -463,6 +598,7 @@ def compile_recovery_branch(
             "slow_planner": slow_planner,
             "source_step_range": [step_indices[0], step_indices[-1]],
             "handover_step": handover_step,
+            "null_events_folded": folded_nulls,
         },
         "stats": {
             "attempts": 0,
@@ -600,7 +736,9 @@ def compile_new_plan_from_state(
     """Compile a full solved slow-planner episode into a new Flash plan (cold start)."""
     family, suite, task, _ = _parse_cell_tag(cell_tag)
     plan_name = f"{family}_{suite}_t{task}"
-    raw_commands, _ = _extract_primitive_commands(state, after_step=-1)
+    raw_commands, _, folded_nulls = _extract_primitive_commands(
+        state, after_step=-1, fold_nulls=True
+    )
     if not raw_commands:
         return None
     records = state.records()
@@ -629,6 +767,7 @@ def compile_new_plan_from_state(
         "compiled_by": "flash_evolve_cold_start",
         "slow_planner": slow_planner,
         "created_at": _utc_now(),
+        "null_events_folded": folded_nulls,
     }
     plan_doc = {
         "schema_version": SCHEMA_VERSION,
@@ -646,6 +785,7 @@ def compile_new_plan_from_state(
                 "slow_planner": slow_planner,
                 "actions": len(plan),
                 "anchors": len(anchors),
+                "null_events_folded": folded_nulls,
             }
         ],
     }
@@ -673,6 +813,7 @@ def compile_new_plan_from_state(
         "actions": len(plan),
         "attached_moves": sum("anchor" in item for item in plan),
         "total_moves": sum(item["action"] in MOVE_ACTIONS for item in plan),
+        "null_events_folded": folded_nulls,
     }
 
 
@@ -984,12 +1125,17 @@ def run_flash_evolve(
                 )
                 if branch is not None:
                     _, branch_id = patch_plan_with_branch(store_dir, plan_name, branch)
+                    folded = int(
+                        (branch.get("provenance") or {}).get("null_events_folded", 0)
+                    )
                     trace_summary["evolved_action"] = "patched_branch"
                     trace_summary["patched_branch_id"] = branch_id
                     trace_summary["patched_branch_actions"] = len(branch["actions"])
+                    trace_summary["null_events_folded"] = folded
                     note(
                         f"patched {plan_name} with recovery branch {branch_id} "
-                        f"({len(branch['actions'])} actions)"
+                        f"({len(branch['actions'])} actions, "
+                        f"{folded} null events folded)"
                     )
 
     trace_summary["elapsed_s"] = round(time.time() - started, 2)
@@ -1017,6 +1163,7 @@ __all__ = [
     "build_handover_message",
     "compile_new_plan_from_state",
     "compile_recovery_branch",
+    "fold_null_events",
     "load_evolving_plan",
     "match_recovery_branch",
     "patch_plan_with_branch",
