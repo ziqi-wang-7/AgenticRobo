@@ -15,6 +15,7 @@
 """Dashboard startup memory requirements before shared robot services."""
 
 import argparse
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -126,3 +127,88 @@ def test_shared_runtime_gets_memory_before_startup(
     assert events == (["sync"] if sync_before_shared else []) + ["shared-runtime"]
     if explicit_repo:
         assert args.memory_dir == str(root)
+
+
+@pytest.mark.parametrize("with_molmo", [False, True])
+def test_flash_evolve_dashboard_forwards_session_options(
+    tmp_path, monkeypatch, with_molmo
+):
+    from robots.libero.robot_spec import get_robot_spec
+    from rpent.planner.base import PlannerResult
+
+    spec = get_robot_spec()
+    parser = _build_argparser()
+    spec.add_cli_args(parser, use_dashboard=True)
+    store = tmp_path / "learned"
+    args = parser.parse_args(
+        [
+            "--robot",
+            "libero",
+            "--dashboard",
+            "--planner",
+            "flash_evolve",
+            "--flash-slow-planner",
+            "claude_code",
+            "--no-flash-evolve",
+            "--memory-profile",
+            "local",
+            "--memory-dir",
+            str(tmp_path / "empty"),
+            "--flash-memory-dir",
+            str(store),
+            "--output-dir",
+            str(tmp_path / "run"),
+            *(["--molmo-endpoint", "http://localhost:1234"] if with_molmo else []),
+        ]
+    )
+    original_ready = DashboardState.shared_services_ready
+    calls = []
+
+    def request_one_task(state):
+        original_ready(state)
+        state.request_task({"suite": "libero_object_task", "task": 0, "seed": 1})
+
+    def init_runtime(args, output_dir, state, components):
+        calls.append(components)
+        return [], {}
+
+    def build(planner, **kwargs):
+        calls.append(
+            (
+                planner,
+                kwargs["flash_slow_planner"],
+                kwargs["flash_evolve"],
+                kwargs["flash_memory_dir"],
+            )
+        )
+        return SimpleNamespace(solve=lambda **kw: PlannerResult())
+
+    monkeypatch.setattr(DashboardState, "shared_services_ready", request_one_task)
+    monkeypatch.setattr(DashboardServer, "start", lambda self: "http://localhost")
+    monkeypatch.setattr(dashboard, "build_planner", build)
+    monkeypatch.setattr(
+        dashboard,
+        "get_toolkit",
+        lambda *a, **kw: SimpleNamespace(
+            memory=None,
+            solved=lambda: False,
+            close=lambda: None,
+            cancel_active_and_wait=lambda: None,
+        ),
+    )
+    # Shut down after the task even when setup fails before planner construction.
+    original_complete = DashboardState.complete_task
+
+    def complete(self, **kwargs):
+        self.request_shutdown()
+        original_complete(self, **kwargs)
+
+    monkeypatch.setattr(DashboardState, "complete_task", complete)
+    dashboard.run_dashboard_session(
+        args, replace(spec, init_runtime=init_runtime), parser=parser
+    )
+    assert calls == [
+        {"vla", "sam3", *(["molmo"] if with_molmo else [])},
+        {"env"},
+        ("flash_evolve", "claude_code", False, store),
+    ]

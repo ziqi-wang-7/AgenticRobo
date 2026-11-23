@@ -690,7 +690,7 @@ def test_full_cli_exploration_finalizes_memory_without_starting_gpu_runtime(
     ]
 
 
-@pytest.mark.parametrize("planner_name", ["codex", "flash"])
+@pytest.mark.parametrize("planner_name", ["codex", "flash", "flash_evolve"])
 @pytest.mark.parametrize(
     "planner_error", [None, "RuntimeError: Grasp not held; replay stopped"]
 )
@@ -772,12 +772,18 @@ def test_full_cli_calls_robot_result_finalizer_without_robot_special_case(
         init_runtime=lambda *args: ([daemon], {"runtime": "simulated"}),
         finalize_run=finalize_run,
         run_flash=lambda *args: {},
+        run_flash_evolve=lambda *args, **kwargs: {},
     )
 
     monkeypatch.setattr(cli, "enumerate_robots", lambda: ("testrobot",))
     monkeypatch.setattr(cli, "get_robot_spec", lambda name: robot_spec)
     monkeypatch.setattr(cli, "build_planner", lambda *args, **kwargs: FakePlanner())
     monkeypatch.setattr(cli, "get_toolkit", lambda *args, **kwargs: robot_toolkit)
+    monkeypatch.setattr(
+        cli,
+        "start_interactive_reader",
+        lambda *args, **kwargs: pytest.fail("The API slow planner uses its native CLI"),
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -791,6 +797,11 @@ def test_full_cli_calls_robot_result_finalizer_without_robot_special_case(
             "1",
             "--planner",
             planner_name,
+            *(
+                ["--interactive", "--flash-slow-planner", "api"]
+                if planner_name == "flash_evolve"
+                else []
+            ),
             "--model",
             "gpt-5.5",
             "--reasoning-effort",

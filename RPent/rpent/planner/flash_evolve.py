@@ -110,8 +110,17 @@ class FlashEvolvePlanner(Planner):
         trace: dict[str, Any] = dict(outcome.get("trace") or {})
         slow_res: PlannerResult | None = outcome.get("slow_planner_result")
         slow_stats = dict(slow_res.stats) if slow_res is not None else {}
+        input_tokens = int(slow_stats.get("total_input_tokens", 0))
+        cached_tokens = int(slow_stats.get("total_cached_input_tokens", 0))
+        if self._slow_planner_name == "claude_code":
+            # Claude reports uncached input, cache writes, and cache reads separately.
+            cached_tokens = int(slow_stats.get("total_cache_read_input_tokens", 0))
+            input_tokens += cached_tokens + int(
+                slow_stats.get("total_cache_creation_input_tokens", 0)
+            )
 
         stats: dict[str, Any] = {
+            **slow_stats,
             "backend": "flash_evolve",
             "slow_planner": self._slow_planner_name,
             "execution_mode": trace.get("execution_mode", "unknown"),
@@ -120,10 +129,8 @@ class FlashEvolvePlanner(Planner):
             "flash_memory_dir": str(self._flash_memory_dir),
             "fast_actions": int(trace.get("fast_actions", 0)),
             "branch_hits": len(trace.get("branch_attempts") or []),
-            "total_input_tokens": int(slow_stats.get("total_input_tokens", 0)),
-            "total_cached_input_tokens": int(
-                slow_stats.get("total_cached_input_tokens", 0)
-            ),
+            "total_input_tokens": input_tokens,
+            "total_cached_input_tokens": cached_tokens,
             "total_output_tokens": int(slow_stats.get("total_output_tokens", 0)),
             "total_reasoning_output_tokens": int(
                 slow_stats.get("total_reasoning_output_tokens", 0)

@@ -219,14 +219,18 @@ def plans(root: Path) -> Path:
     return root
 
 
-def load(root: Path, plan_name: str) -> dict:
+def load(root: Path, plan_name: str, *, plan_doc: dict[str, Any] | None = None) -> dict:
     """Read one program: its plan, and the anchors its coordinates were written against."""
-    plan = json.loads((root / f"{plan_name}_plan.json").read_text())["plan"]
-    anchors = json.loads((root / f"{plan_name}_anchors.json").read_text())["anchors"]
+    if plan_doc is None:
+        plan_doc = json.loads((root / f"{plan_name}_plan.json").read_text("utf-8"))
+    anchors = json.loads((root / f"{plan_name}_anchors.json").read_text("utf-8"))[
+        "anchors"
+    ]
     return {
-        "plan": plan,
+        "plan": plan_doc["plan"],
         "reference": {a["phrase"]: np.array(a["median_xy"]) for a in anchors},
         "locator_of": {a["phrase"]: a["locator"] for a in anchors},
+        "camera_of": {a["phrase"]: a.get("camera", "agentview") for a in anchors},
     }
 
 
@@ -458,55 +462,78 @@ def _eef_xy(state: EnvState) -> list[float] | None:
     return None
 
 
+def _episode_ended(toolkit: Any) -> bool:
+    record = toolkit.state.latest_record()
+    return bool(toolkit.solved() or (record is not None and record.truncated))
+
+
+def _segment_xy(
+    call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
+    phrase: str,
+    camera: str,
+    step: int,
+    min_score: float,
+    note: Callable[[str], None],
+) -> np.ndarray | None:
+    try:
+        found = call_tool(
+            "segment",
+            {"prompt": phrase, "camera": camera, "step": step, "min_score": min_score},
+        )
+    except RuntimeError as exc:
+        note(f"      {phrase[:26]!r} segmentation failed: {exc}")
+        return None
+    world = found.get("world_xyz")
+    if isinstance(world, list) and len(world) >= 2:
+        xy = np.asarray(world[:2], dtype=float)
+        if np.isfinite(xy).all() and np.max(np.abs(xy)) <= REACH:
+            return xy
+    return None
+
+
 def _survey_live_anchors(
     toolkit: Any,
     molmo: MolmoClient | None,
     *,
     reference: dict[str, np.ndarray],
     locator_of: dict[str, str],
+    camera_of: dict[str, str],
     plan: list[dict[str, Any]],
     opening: int,
     note: Callable[[str], None],
     allow_sam3_fallback: bool,
+    call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
 ) -> dict[str, np.ndarray]:
     """Localize plan anchors via Molmo+SAM3, or SAM3-only when Molmo is absent."""
     state = toolkit.state
     live: dict[str, np.ndarray] = {}
     for phrase in reference:
+        if _episode_ended(toolkit):
+            break
         use_segment = locator_of.get(phrase) == "segment" or (
             molmo is None and allow_sam3_fallback
         )
-        xy: np.ndarray | None = None
+        xy = None
         if use_segment:
-            try:
-                found = execute(
-                    toolkit,
-                    "segment",
-                    {
-                        "prompt": phrase,
-                        "camera": "agentview",
-                        "step": opening,
-                        "min_score": 0.15 if molmo is None else 0.2,
-                    },
+            camera = camera_of.get(phrase, "agentview")
+            min_score = 0.15 if molmo is None else 0.2
+            xy = _segment_xy(call_tool, phrase, camera, opening, min_score, note)
+            # A wrist observation can come from a later pose in the teaching
+            # episode. The fixed camera can still see the object at reset.
+            if xy is None and camera == "wrist":
+                xy = _segment_xy(
+                    call_tool, phrase, "agentview", opening, min_score, note
                 )
-            except RuntimeError as exc:
-                note(f"      {phrase[:26]!r} segmentation failed: {exc}")
-                found = {}
-            world = found.get("world_xyz")
-            xy = (
-                np.array(world[:2], dtype=float)
-                if isinstance(world, list) and len(world) >= 2
-                else None
-            )
         elif molmo is not None:
-            got = locate(
-                molmo, state, opening, "agentview", prompt_for("survey", phrase)
-            )
-            xy = got["xy"] if got else None
-        if xy is None or max(abs(xy[0]), abs(xy[1])) > REACH:
+            try:
+                got = locate(
+                    molmo, state, opening, "agentview", prompt_for("survey", phrase)
+                )
+                xy = got["xy"] if got else None
+            except (RuntimeError, OSError, ValueError) as exc:
+                note(f"      {phrase[:26]!r} point grounding failed: {exc}")
+        if xy is None or not np.isfinite(xy).all() or np.max(np.abs(xy)) > REACH:
             note(f"      {phrase[:26]!r} not located, or out of reach")
-            continue
-        if any(np.linalg.norm(a - xy) < 0.03 for a in live.values()):
             continue
         live[phrase] = xy
 
@@ -526,13 +553,13 @@ def _survey_live_anchors(
         ),
         default=0.72,
     )
-    for phrase in list(live):
+    for phrase, coarse in live.items():
+        if _episode_ended(toolkit):
+            break
         if locator_of.get(phrase) == "segment":
             continue
-        coarse = live[phrase]
         try:
-            execute(
-                toolkit,
+            call_tool(
                 "move_to",
                 {
                     "xyz": [
@@ -546,19 +573,18 @@ def _survey_live_anchors(
                     "tol": 0.012,
                 },
             )
-        except Exception:
+            if _episode_ended(toolkit):
+                break
+            close = locate(
+                molmo, state, state.latest_step, "wrist", prompt_for("refine", phrase)
+            )
+        except (RuntimeError, OSError, ValueError) as exc:
+            note(f"      {phrase[:26]!r} wrist refinement failed: {exc}")
             continue
-        close = locate(
-            molmo,
-            state,
-            state.latest_step or opening,
-            "wrist",
-            prompt_for("refine", phrase),
-        )
         if close is None:
             continue
         gap = float(np.linalg.norm(close["xy"] - coarse))
-        if gap > REFINE_ACCEPT:
+        if not np.isfinite(gap) or gap > REFINE_ACCEPT:
             note(f"      {phrase[:20]!r} close reading {gap:.3f} away, rejected")
             continue
         note(f"      {phrase[:20]!r} refined by {gap:.3f}")
@@ -573,276 +599,177 @@ def _run_anchored_sequence(
     live: dict[str, np.ndarray],
     *,
     note: Callable[[str], None],
-    offset: np.ndarray,
-    held_phrase: str,
-    recent: list[tuple[str, dict[str, Any]]],
-    start_idx: int = 0,
-    allow_pick_retry: bool = True,
+    call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
+    recorded_commands: bool,
 ) -> dict[str, Any]:
     """Execute anchored actions until completion or first physical anomaly."""
     state = toolkit.state
-
-    def look() -> int:
-        step = state.latest_step
-        if step is None:
-            raise RuntimeError("Flash Mode replay requires an initialized environment")
-        return step
-
-    def finished() -> bool:
-        return bool(toolkit.solved())
-
-    executed_trace: list[dict[str, Any]] = []
+    offset = np.zeros(2)
+    held_phrase = "object"
+    recent: list[tuple[int, str, dict[str, Any], str | None]] = []
+    trace: list[dict[str, Any]] = []
     failure: dict[str, Any] | None = None
     last_anchor: str | None = None
 
-    for rel_idx, entry in enumerate(actions):
-        plan_idx = start_idx + rel_idx
-        if finished():
+    def fail(idx: int, name: str, anchor: str | None, kind: str, detail: str) -> None:
+        nonlocal failure
+        xy = live.get(anchor) if anchor is not None else None
+        failure = {
+            "failure_kind": kind,
+            "failed_step_idx": idx,
+            "failed_action": name,
+            "anchor": anchor,
+            "anchor_xy": xy.round(4).tolist() if xy is not None else None,
+            "eef_xy": _eef_xy(state),
+            "detail": detail,
+        }
+
+    def perform(
+        idx: int, name: str, args: dict[str, Any], anchor: str | None
+    ) -> dict[str, Any]:
+        entry = {"plan_idx": idx, "action": name, "status": "ok"}
+        trace.append(entry)
+        try:
+            raw = call_tool(name, args)
+        except RuntimeError as exc:
+            entry["status"] = "error"
+            fail(idx, name, anchor, "action_error", str(exc))
+            return {}
+        record = state.latest_record()
+        if (
+            name in {"move_to", "move_pose"}
+            and record is not None
+            and motion_alert(record)
+        ):
+            entry["status"] = "motion_stalled"
+            fail(
+                idx,
+                name,
+                anchor,
+                "motion_stalled",
+                f"{name} stalled with servo residual exceeding tolerance",
+            )
+        elif name == "pi0_pick" and not pick_succeeded(raw):
+            entry["status"] = "pick_failed"
+        return raw
+
+    for idx, entry in enumerate(actions):
+        if _episode_ended(toolkit):
             break
         name = entry["action"]
-        arguments = dict(entry.get("arguments") or {})
+        if name in {"segment", "segment_point"}:
+            continue
+        args = dict(entry.get("arguments") or {})
         phrase = entry.get("anchor")
-        if phrase:
-            last_anchor = str(phrase)
-        anchor_xy = (
-            [
-                round(float(live[last_anchor][0]), 4),
-                round(float(live[last_anchor][1]), 4),
-            ]
-            if last_anchor and last_anchor in live
-            else None
-        )
+        last_anchor = phrase or last_anchor
 
         if name in {"move_to", "move_pose"}:
-            xyz = arguments.get("xyz") or []
+            xyz = args.get("xyz") or []
             if len(xyz) != 3:
-                continue
+                fail(
+                    idx,
+                    name,
+                    last_anchor,
+                    "action_error",
+                    f"{name} requires a three-coordinate xyz",
+                )
+                break
             target = np.array(xyz[:2], dtype=float)
-            attached = (
-                phrase is not None and entry.get("anchor_distance", 9) <= MAX_ATTACH
-            )
-            if attached and phrase not in live:
-                failure = {
-                    "failure_kind": "anchor_missing",
-                    "failed_step_idx": plan_idx,
-                    "failed_action": name,
-                    "anchor": phrase,
-                    "anchor_xy": None,
-                    "eef_xy": _eef_xy(state),
-                    "detail": f"attached anchor {phrase!r} could not be localized",
-                }
-                executed_trace.append(
-                    {"plan_idx": plan_idx, "action": name, "status": "anchor_missing"}
-                )
-                break
-            if attached:
+            if phrase is not None and entry.get("anchor_distance", 9) <= MAX_ATTACH:
+                if phrase not in live:
+                    fail(
+                        idx,
+                        name,
+                        phrase,
+                        "anchor_missing",
+                        f"attached anchor {phrase!r} could not be localized",
+                    )
+                    break
                 target = live[phrase] + np.array(entry["offset"])
-            held = arguments.get("gripper", -1) == 1
-            if held:
+            if not recorded_commands and args.get("gripper", -1) == 1:
                 target = target - offset
-            if max(abs(target[0]), abs(target[1])) > REACH:
-                failure = {
-                    "failure_kind": "motion_stalled",
-                    "failed_step_idx": plan_idx,
-                    "failed_action": name,
-                    "anchor": phrase,
-                    "anchor_xy": anchor_xy,
-                    "eef_xy": _eef_xy(state),
-                    "detail": f"target xy {target.tolist()} exceeds reachable workspace {REACH}",
-                }
-                executed_trace.append(
-                    {"plan_idx": plan_idx, "action": name, "status": "out_of_reach"}
+            if not np.isfinite(target).all() or np.max(np.abs(target)) > REACH:
+                fail(
+                    idx,
+                    name,
+                    last_anchor,
+                    "motion_stalled",
+                    f"target xy {target.tolist()} exceeds reachable workspace {REACH}",
                 )
                 break
-            arguments["xyz"] = [
+            args["xyz"] = [
                 round(float(target[0]), 4),
                 round(float(target[1]), 4),
                 float(xyz[2]),
             ]
-            try:
-                execute(toolkit, name, arguments)
-            except RuntimeError as exc:
-                failure = {
-                    "failure_kind": "action_error",
-                    "failed_step_idx": plan_idx,
-                    "failed_action": name,
-                    "anchor": phrase,
-                    "anchor_xy": anchor_xy,
-                    "eef_xy": _eef_xy(state),
-                    "detail": str(exc),
-                }
-                executed_trace.append(
-                    {"plan_idx": plan_idx, "action": name, "status": "error"}
-                )
-                break
-            look()
-            latest = state.latest_record()
-            if latest is not None and motion_alert(latest):
-                failure = {
-                    "failure_kind": "motion_stalled",
-                    "failed_step_idx": plan_idx,
-                    "failed_action": name,
-                    "anchor": phrase or last_anchor,
-                    "anchor_xy": anchor_xy,
-                    "eef_xy": _eef_xy(state),
-                    "detail": f"{name} stalled with servo residual exceeding tolerance",
-                }
-                executed_trace.append(
-                    {"plan_idx": plan_idx, "action": name, "status": "motion_stalled"}
-                )
-                break
-            executed_trace.append(
-                {"plan_idx": plan_idx, "action": name, "status": "ok"}
-            )
-        elif name in {"segment", "segment_point"}:
-            continue
         elif name in {"pi0_pick", "pi0_doubled"}:
-            prompt = str(arguments.get("prompt", ""))
+            prompt = str(args.get("prompt", ""))
             stripped = re.sub(r"^(pick up|grasp)\s+the\s+", "", prompt, flags=re.I)
             held_phrase = re.split(r"\b(on|in|into|inside|by|and)\b", stripped)[
                 0
             ].strip()
-            if name == "pi0_pick":
-                arguments.update(FLASH_PICK_THRESHOLDS)
-            try:
-                raw = execute(toolkit, name, arguments)
-            except RuntimeError as exc:
-                failure = {
-                    "failure_kind": "action_error",
-                    "failed_step_idx": plan_idx,
-                    "failed_action": name,
-                    "anchor": last_anchor,
-                    "anchor_xy": anchor_xy,
-                    "eef_xy": _eef_xy(state),
-                    "detail": str(exc),
-                }
-                executed_trace.append(
-                    {"plan_idx": plan_idx, "action": name, "status": "error"}
-                )
-                break
-            look()
-            if name == "pi0_pick" and not pick_succeeded(raw):
-                if allow_pick_retry:
-                    for _ in range(PICK_ATTEMPTS - 1):
-                        if finished():
-                            break
-                        for again, again_args in recent:
-                            execute(toolkit, again, dict(again_args))
-                        raw = execute(toolkit, name, dict(arguments))
-                        look()
-                        if pick_succeeded(raw):
-                            break
-                if not pick_succeeded(raw):
-                    failure = {
-                        "failure_kind": "pick_failed",
-                        "failed_step_idx": plan_idx,
-                        "failed_action": name,
-                        "anchor": last_anchor,
-                        "anchor_xy": anchor_xy,
-                        "eef_xy": _eef_xy(state),
-                        "detail": (
-                            f"pi0_pick({prompt!r}) failed after "
-                            f"{PICK_ATTEMPTS if allow_pick_retry else 1} attempt(s)"
-                        ),
-                    }
-                    executed_trace.append(
-                        {"plan_idx": plan_idx, "action": name, "status": "pick_failed"}
-                    )
+            if name == "pi0_pick" and not recorded_commands:
+                args.update(FLASH_PICK_THRESHOLDS)
+
+        raw = perform(idx, name, args, last_anchor)
+        if failure or _episode_ended(toolkit):
+            break
+        if name == "pi0_pick" and not pick_succeeded(raw):
+            attempts = 1
+            while not recorded_commands and attempts < PICK_ATTEMPTS:
+                for again in recent:
+                    perform(*again)
+                    if failure or _episode_ended(toolkit):
+                        break
+                if failure or _episode_ended(toolkit):
                     break
-            executed_trace.append(
-                {"plan_idx": plan_idx, "action": name, "status": "ok"}
-            )
-        elif name == "set_gripper":
-            try:
-                execute(toolkit, name, arguments)
-            except RuntimeError as exc:
-                failure = {
-                    "failure_kind": "action_error",
-                    "failed_step_idx": plan_idx,
-                    "failed_action": name,
-                    "anchor": last_anchor,
-                    "anchor_xy": anchor_xy,
-                    "eef_xy": _eef_xy(state),
-                    "detail": str(exc),
-                }
-                executed_trace.append(
-                    {"plan_idx": plan_idx, "action": name, "status": "error"}
+                raw = perform(idx, name, args, last_anchor)
+                attempts += 1
+                if failure or _episode_ended(toolkit) or pick_succeeded(raw):
+                    break
+            if failure or _episode_ended(toolkit):
+                break
+            if not pick_succeeded(raw):
+                fail(
+                    idx,
+                    name,
+                    last_anchor,
+                    "pick_failed",
+                    f"pi0_pick({prompt!r}) failed after {attempts} attempt(s)",
                 )
                 break
-            held_step = look()
-            if molmo is not None:
-                body = held_body(
-                    molmo, state, held_step, prompt_for("held", held_phrase)
-                )
-                eef = np.asarray(state.get(held_step).state["robot0_eef_pos"][:2])
-                candidate = body["xy"] - eef if body is not None else None
-                if candidate is not None and np.linalg.norm(candidate) <= MAX_HELD:
-                    offset = candidate
-                    note(f"      held offset ({offset[0]:+.4f},{offset[1]:+.4f})")
-                else:
-                    offset = np.zeros(2)
-            executed_trace.append(
-                {"plan_idx": plan_idx, "action": name, "status": "ok"}
-            )
-        elif name == "release":
-            try:
-                execute(toolkit, name, arguments)
-            except RuntimeError as exc:
-                failure = {
-                    "failure_kind": "action_error",
-                    "failed_step_idx": plan_idx,
-                    "failed_action": name,
-                    "anchor": last_anchor,
-                    "anchor_xy": anchor_xy,
-                    "eef_xy": _eef_xy(state),
-                    "detail": str(exc),
-                }
-                executed_trace.append(
-                    {"plan_idx": plan_idx, "action": name, "status": "error"}
-                )
-                break
+        elif name == "set_gripper" and not recorded_commands:
             offset = np.zeros(2)
-            look()
-            executed_trace.append(
-                {"plan_idx": plan_idx, "action": name, "status": "ok"}
-            )
-        else:
-            try:
-                execute(toolkit, name, arguments)
-            except RuntimeError as exc:
-                failure = {
-                    "failure_kind": "action_error",
-                    "failed_step_idx": plan_idx,
-                    "failed_action": name,
-                    "anchor": last_anchor,
-                    "anchor_xy": anchor_xy,
-                    "eef_xy": _eef_xy(state),
-                    "detail": str(exc),
-                }
-                executed_trace.append(
-                    {"plan_idx": plan_idx, "action": name, "status": "error"}
-                )
-                break
-            look()
-            executed_trace.append(
-                {"plan_idx": plan_idx, "action": name, "status": "ok"}
-            )
+            if molmo is not None and args.get("gripper", -1) == 1:
+                try:
+                    body = held_body(
+                        molmo, state, state.latest_step, prompt_for("held", held_phrase)
+                    )
+                except (RuntimeError, OSError, ValueError) as exc:
+                    note(f"      held object grounding failed: {exc}")
+                    body = None
+                eef = _eef_xy(state)
+                if body is not None and eef is not None:
+                    candidate = body["xy"] - eef
+                    if np.linalg.norm(candidate) <= MAX_HELD:
+                        offset = candidate
+                        note(f"      held offset ({offset[0]:+.4f},{offset[1]:+.4f})")
+        elif name == "release":
+            offset = np.zeros(2)
 
         if name in {"release", "pi0_pick", "pi0_doubled"}:
             recent.clear()
-        elif name in {"move_to", "move_pose", "set_gripper", "rotate_wrist"}:
-            recent.append((name, dict(arguments)))
+        elif name in {
+            "move_to",
+            "move_pose",
+            "set_gripper",
+            "rotate_wrist",
+            "rotate_pitch",
+        }:
+            recent.append((idx, name, args, last_anchor))
             recent = recent[-6:]
 
-    return {
-        "done": finished(),
-        "failure": failure,
-        "executed_trace": executed_trace,
-        "offset": offset,
-        "held_phrase": held_phrase,
-        "recent": recent,
-        "last_anchor": last_anchor,
-    }
+    return {"failure": failure, "executed_trace": trace, "last_anchor": last_anchor}
 
 
 def replay_with_evolution(
@@ -854,160 +781,136 @@ def replay_with_evolution(
     branch_matcher: Callable[..., dict[str, Any] | None] | None = None,
     allow_sam3_fallback: bool = True,
 ) -> dict[str, Any]:
-    """Replay a Flash plan with anomaly detection and learned recovery branches.
-
-    Unlike :func:`replay`, this function never silently discards failed
-    subtasks via ``skip_suffix``: on the first anomaly (or when the plan ends
-    without ``terminated == true``), it tries a matching learned recovery
-    branch at zero LLM cost, and if the task is still unsolved it returns a
-    structured handover snapshot for the slow planner to take over in-place.
-    """
+    """Replay one plan, try a learned recovery and report the live handover state."""
     plan = list(program["plan"])
-    reference = program["reference"]
-    locator_of = program["locator_of"]
     state = toolkit.state
-
     opening = state.latest_step
     if opening is None:
         raise RuntimeError("Flash Mode replay requires an initialized environment")
 
+    tool_calls = 0
+
+    def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        nonlocal tool_calls
+        tool_calls += 1
+        return execute(toolkit, name, args)
+
     live = _survey_live_anchors(
         toolkit,
         molmo,
-        reference=reference,
-        locator_of=locator_of,
+        reference=program["reference"],
+        locator_of=program["locator_of"],
+        camera_of=program.get("camera_of", {}),
         plan=plan,
         opening=opening,
         note=note,
         allow_sam3_fallback=allow_sam3_fallback,
+        call_tool=call_tool,
     )
-    live_serializable = {
-        phrase: [round(float(xy[0]), 4), round(float(xy[1]), 4)]
-        for phrase, xy in live.items()
-    }
-
-    offset = np.zeros(2)
-    held_phrase = "object"
-    recent: list[tuple[str, dict[str, Any]]] = []
     main_run = _run_anchored_sequence(
         toolkit,
         molmo,
         plan,
         live,
         note=note,
-        offset=offset,
-        held_phrase=held_phrase,
-        recent=recent,
-        start_idx=0,
-        allow_pick_retry=True,
+        call_tool=call_tool,
+        recorded_commands=(program.get("source") or {}).get("compiled_by")
+        == "flash_evolve_cold_start",
     )
-    executed_trace = list(main_run["executed_trace"])
-    branch_attempts: list[dict[str, Any]] = []
-
-    if main_run["done"]:
-        return {
-            "done": True,
-            "mode": "flash_fast",
-            "anchors": len(live),
-            "live_anchors": live_serializable,
-            "plan": len(plan),
-            "executed_steps": len(executed_trace),
-            "handover_step": int(state.latest_step or 0),
-            "failure": None,
-            "executed_trace": executed_trace,
-            "remaining_plan": [],
-            "branch_attempts": branch_attempts,
-        }
-
+    trace = main_run["executed_trace"]
+    failure_step = state.latest_step
     failure = main_run["failure"]
-    if failure is None:
-        last_anchor = main_run.get("last_anchor")
+    if failure is None and not _episode_ended(toolkit):
+        last_anchor = main_run["last_anchor"]
+        xy = live.get(last_anchor)
         failure = {
             "failure_kind": "plan_incomplete",
             "failed_step_idx": len(plan),
             "failed_action": plan[-1]["action"] if plan else None,
             "anchor": last_anchor,
-            "anchor_xy": live_serializable.get(last_anchor) if last_anchor else None,
+            "anchor_xy": xy.round(4).tolist() if xy is not None else None,
             "eef_xy": _eef_xy(state),
             "detail": "Flash plan finished all steps but environment did not terminate",
         }
 
-    # Try matching learned recovery branch at zero LLM tokens before handover.
-    tried_ids: set[str] = set()
-    if branch_matcher is not None:
-        branch = branch_matcher(program, failure, tried_ids=tried_ids)
+    branch_attempts: list[dict[str, Any]] = []
+    if failure and not _episode_ended(toolkit) and branch_matcher is not None:
+        branch = branch_matcher(program, failure, tried_ids=set())
         if branch is not None:
             branch_id = str(branch["branch_id"])
-            tried_ids.add(branch_id)
             note(
                 f"    matched learned recovery branch {branch_id} "
                 f"for {failure['failure_kind']} at step {failure['failed_step_idx']}"
             )
+            # These anchors were first observed by the slow planner at handover.
+            # Survey them in this frame without moving the gripper or changing its grasp.
+            calls_before_branch = tool_calls
+            for anchor in branch.get("anchors", ()):
+                phrase = anchor["phrase"]
+                xy = _segment_xy(
+                    call_tool,
+                    phrase,
+                    anchor.get("camera", "agentview"),
+                    failure_step,
+                    0.2,
+                    note,
+                )
+                if xy is None:
+                    live.pop(phrase, None)
+                else:
+                    live[phrase] = xy
             branch_run = _run_anchored_sequence(
                 toolkit,
                 molmo,
-                list(branch.get("actions") or []),
+                list(branch["actions"]),
                 live,
                 note=note,
-                offset=main_run["offset"],
-                held_phrase=main_run["held_phrase"],
-                recent=[],
-                start_idx=0,
-                allow_pick_retry=False,
+                call_tool=call_tool,
+                recorded_commands=True,
             )
-            branch_succeeded = bool(branch_run["done"])
             branch_attempts.append(
                 {
                     "branch_id": branch_id,
                     "failure_kind": failure["failure_kind"],
-                    "succeeded": branch_succeeded,
-                    "actions_executed": len(branch_run["executed_trace"]),
+                    "succeeded": bool(toolkit.solved()),
+                    "actions_executed": tool_calls - calls_before_branch,
                 }
             )
-            executed_trace.extend(
+            trace.extend(
                 {**item, "branch_id": branch_id}
                 for item in branch_run["executed_trace"]
             )
-            if branch_succeeded:
-                return {
-                    "done": True,
-                    "mode": "flash_branch",
-                    "anchors": len(live),
-                    "live_anchors": live_serializable,
-                    "plan": len(plan),
-                    "executed_steps": len(executed_trace),
-                    "handover_step": int(state.latest_step or 0),
-                    "failure": failure,
-                    "executed_trace": executed_trace,
-                    "remaining_plan": [],
-                    "branch_attempts": branch_attempts,
-                }
             if branch_run["failure"] is not None:
-                failure = {
-                    **failure,
-                    "branch_failure_detail": branch_run["failure"].get("detail"),
-                }
+                failure["branch_failure_detail"] = branch_run["failure"]["detail"]
 
-    failed_idx = int(failure.get("failed_step_idx", len(plan)))
-    remaining = [
-        {
-            "plan_idx": idx,
-            "action": entry["action"],
-            "anchor": entry.get("anchor"),
-        }
-        for idx, entry in enumerate(plan[failed_idx:], start=failed_idx)
-    ]
+    done = bool(toolkit.solved())
+    if done:
+        mode = "flash_branch" if branch_attempts else "flash_fast"
+    elif _episode_ended(toolkit):
+        mode = "flash_truncated"
+    else:
+        mode = "needs_handover"
+
+    failed_idx = (
+        int(failure["failed_step_idx"])
+        if failure and mode == "needs_handover"
+        else len(plan)
+    )
     return {
-        "done": False,
-        "mode": "needs_handover",
+        "done": done,
+        "mode": mode,
         "anchors": len(live),
-        "live_anchors": live_serializable,
+        "live_anchors": {phrase: xy.round(4).tolist() for phrase, xy in live.items()},
         "plan": len(plan),
-        "executed_steps": len(executed_trace),
-        "handover_step": int(state.latest_step or 0),
+        "executed_steps": tool_calls,
+        "handover_step": state.latest_step,
+        "failure_step": failure_step,
         "failure": failure,
-        "executed_trace": executed_trace,
-        "remaining_plan": remaining,
+        "executed_trace": trace,
+        "remaining_plan": [
+            {"plan_idx": idx, "action": entry["action"], "anchor": entry.get("anchor")}
+            for idx, entry in enumerate(plan[failed_idx:], start=failed_idx)
+        ],
         "branch_attempts": branch_attempts,
     }
 

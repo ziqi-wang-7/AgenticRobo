@@ -153,9 +153,25 @@ def collect(
     native = transcript.get("environment_success")
     if native is None and env:
         native = any(e["native_success"] for e in env)
-    budget = error and any(
-        s in error.lower()
-        for s in ("timed out after 1200", "max_turns", "max turns", "maximum turns")
+    stream_events = [
+        e for stream in run.glob("*.stream.jsonl") for e in read_events(stream)
+    ]
+    budget = error and (
+        any(
+            s in error.lower()
+            for s in ("timed out after 1200", "max_turns", "max turns", "maximum turns")
+        )
+        or (
+            error.startswith(
+                ("Claude Agent SDK result ", "ResultError:", "ProcessError:")
+            )
+            and any(
+                e.get("type") == "ResultMessage"
+                and e.get("is_error")
+                and e.get("subtype") in {"error_max_budget_usd", "error_max_turns"}
+                for e in stream_events
+            )
+        )
     )
     infra = (
         not transcript
@@ -168,9 +184,6 @@ def collect(
     tools = [e for e in events if e["kind"] == "tool"]
     memory = [e for e in tools if e["memory_operation"]]
     injections = [e for e in events if e["kind"] == "memory_injection"]
-    stream_events = [
-        e for stream in run.glob("*.stream.jsonl") for e in read_events(stream)
-    ]
     native_reads = []
     plan_path = services.parent / "plan.json"
     if plan_path.exists():

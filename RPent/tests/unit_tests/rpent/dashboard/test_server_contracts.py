@@ -156,18 +156,21 @@ def test_server_side_base_url_is_merged_into_the_request(
     assert request.base_url == "https://gw.example"
 
 
+@pytest.mark.parametrize(
+    ("planner", "backend"), [("codex", "codex"), ("flash_evolve", "claude_code")]
+)
 def test_the_server_planner_default_applies_when_the_form_omits_it(
-    monkeypatch: pytest.MonkeyPatch, state: DashboardState
+    monkeypatch: pytest.MonkeyPatch, state: DashboardState, planner: str, backend: str
 ) -> None:
     captured = _stub_check(
         monkeypatch,
         LlmCheckResult(ok=True, status=STATUS_OK, planner="codex"),
     )
-    server = _server(state, planner="codex")
+    server = _server(state, planner=planner, flash_slow_planner=backend)
 
     _client(server).post("/api/llm/check", json={})
 
-    assert captured["request"].planner == "codex"
+    assert captured["request"].planner == backend
 
 
 def test_the_run_timeout_is_never_inherited_by_the_check(

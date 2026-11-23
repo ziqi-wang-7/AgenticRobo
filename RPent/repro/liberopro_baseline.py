@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import fcntl
 import hashlib
 import json
 import os
@@ -52,8 +51,11 @@ def write(path: Path, data: object) -> None:
 
 def sha(path: Path) -> str:
     """Hash source and checkpoint files with bounded memory."""
+    digest = hashlib.sha256()
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def validate_scenes(plan: dict) -> None:
@@ -149,8 +151,8 @@ def command(batch: Path, cell: dict, deployment: dict) -> list[str]:
                 if plan.get("action_evidence", False):
                     argv.append("--memcodex-action-evidence")
         elif plan.get("condition") == "flash_evolve":
-            planner_idx = argv.index("--planner")
-            argv[planner_idx + 1] = "flash_evolve"
+            argv[argv.index("--planner") + 1] = "flash_evolve"
+            argv[argv.index("--model") + 1] = plan.get("model", "gpt-6-astra")
             argv.extend(
                 [
                     "--flash-slow-planner",
@@ -323,8 +325,31 @@ def report(batch: Path) -> dict:
     return summary
 
 
+def _telemetry_error(plan: dict, run_dir: Path, coverage: dict) -> str | None:
+    """Check the measurements produced by the episode's execution path."""
+    require_codex_spans = True
+    if plan.get("condition") == "flash_evolve":
+        path = run_dir / "flash_evolve_trace.json"
+        if not path.is_file():
+            return "Flash-Evolve trace missing"
+        trace = json.loads(path.read_text(encoding="utf-8"))
+        require_codex_spans = (
+            trace["slow_result"] is not None
+            and plan.get("flash_slow_planner", "codex") == "codex"
+        )
+    if require_codex_spans and (
+        not coverage["sampling_spans"] or not coverage["llm_request_spans"]
+    ):
+        return "Codex request telemetry missing"
+    if coverage["vla_client_calls"] != coverage["vla_server_calls"]:
+        return "VLA telemetry coverage mismatch"
+    return None
+
+
 def run(batch: Path) -> None:
     """Own services and sequential workers, stopping explicitly on infra failures."""
+    import fcntl
+
     from robots.libero.memory import _matches_files
     from rpent.utils.daemon import ProcessDaemon
     from rpent.utils.rpc.client_utils import make_rpc_client, wait_for_ready
@@ -551,6 +576,16 @@ def run(batch: Path) -> None:
                         status="infrastructure_error",
                         error="MemCodex memory delivery or native-tool isolation check failed",
                     )
+            if result["valid"]:
+                measurement_error = _telemetry_error(
+                    plan, run_dir, result["telemetry_coverage"]
+                )
+                if measurement_error:
+                    result.update(
+                        valid=False,
+                        status="infrastructure_error",
+                        error=measurement_error,
+                    )
             write(run_dir / "metrics.json", result)
             if not _matches_files(memory, plan["memory_receipt"]["files"]):
                 raise RuntimeError("Official HF memory changed during evaluation")
@@ -571,18 +606,6 @@ def run(batch: Path) -> None:
                 raise RuntimeError(
                     f"Infrastructure failure: {cell['episode_id']}: {result['error']}"
                 )
-            if (
-                not result["telemetry_coverage"]["sampling_spans"]
-                or not result["telemetry_coverage"]["llm_request_spans"]
-            ):
-                raise RuntimeError(
-                    "Request telemetry missing; preserve episode and diagnose before continuing"
-                )
-            if (
-                result["telemetry_coverage"]["vla_client_calls"]
-                != result["telemetry_coverage"]["vla_server_calls"]
-            ):
-                raise RuntimeError("VLA telemetry coverage mismatch")
         write(
             batch / "status.json",
             {"phase": "complete", "at": now(), "completed": len(plan["episodes"])},

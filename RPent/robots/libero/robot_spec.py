@@ -92,7 +92,8 @@ LIBERO_DASHBOARD_SPEC: DashboardSpec = {
             "name": "molmo",
             "label": "Molmo",
             "scope": "shared",
-            "planners": ("flash",),
+            "planners": ("flash", "flash_evolve"),
+            "requires_arg": "molmo_endpoint",
         },
     ),
     "primitives": (
@@ -385,7 +386,7 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
         else get_memory_dir("libero")
     )
     local_eval = not explore and memory_profile == "local"
-    if local_eval:
+    if local_eval and planner != "flash_evolve":
         if planner == "flash":
             from robots.libero.memory import replay_directory
 

@@ -34,7 +34,7 @@ from rpent.cli.main import (
 from rpent.dashboard.events import RunStartedEvent
 from rpent.evaluation import RunFinalizationContext
 from rpent.memory import MemoryManager
-from rpent.planner.base import build_planner
+from rpent.planner.base import build_planner, effective_planner
 from rpent.robots import get_toolkit
 from rpent.utils.config import get_memory_dir
 from rpent.utils.logging import get_logger, init_output_dir
@@ -73,7 +73,11 @@ def run_dashboard_session(
     runtime_components = tuple(
         component
         for component in dashboard_spec["runtime_components"]
-        if not component.get("planners") or args.planner in component["planners"]
+        if (not component.get("planners") or args.planner in component["planners"])
+        and (
+            not component.get("requires_arg")
+            or getattr(args, component["requires_arg"], None)
+        )
     )
     dashboard_spec = {**dashboard_spec, "runtime_components": runtime_components}
     shared_components = {
@@ -104,8 +108,11 @@ def run_dashboard_session(
         parser.error(
             "--env-endpoint is required for this external-environment Dashboard"
         )
-    if args.planner == "api" and not args.model:
-        parser.error("--model is required when --planner=api")
+    if (
+        effective_planner(args.planner, args.flash_slow_planner) == "api"
+        and not args.model
+    ):
+        parser.error("--model is required for the api planner")
 
     if args.output_dir is None:
         timestamp = datetime.now().strftime("%Y%m%d-%H:%M:%S")
@@ -125,6 +132,7 @@ def run_dashboard_session(
         language=args.dashboard_language,
         state=state,
         planner=args.planner,
+        flash_slow_planner=args.flash_slow_planner,
         model=args.model,
         base_url=args.base_url,
     )
@@ -322,6 +330,11 @@ def _run_dashboard_task(
                         claude_code_max_budget_usd=args.claude_code_max_budget_usd,
                         dashboard_events=state,
                         no_images=args.no_images,
+                        flash_slow_planner=getattr(
+                            task_args, "flash_slow_planner", "codex"
+                        ),
+                        flash_memory_dir=getattr(task_args, "flash_memory_dir", None),
+                        flash_evolve=getattr(task_args, "flash_evolve", True),
                     )
                     result = planner.solve(
                         system_prompt=system_prompt,

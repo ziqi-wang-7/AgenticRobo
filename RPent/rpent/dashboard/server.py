@@ -68,6 +68,7 @@ class DashboardServer:
         language: str = "en",
         state: DashboardState,
         planner: str | None = None,
+        flash_slow_planner: str = "codex",
         model: str | None = None,
         base_url: str | None = None,
     ) -> None:
@@ -75,6 +76,8 @@ class DashboardServer:
         self.port = int(port)
         self._state = state
         self._planner_config = {"planner": planner, "model": model}
+        if planner == "flash_evolve":
+            self._planner_config["flash_slow_planner"] = flash_slow_planner
         # Server-side context the page cannot supply. The check keeps its own
         # short timeouts; the run's is never reused.
         self._llm_check_base_url = base_url
@@ -168,11 +171,12 @@ class DashboardServer:
                 from rpent.planner.check import LlmCheckRequest, check_llm
 
                 configured = self._planner_config
+                planner = payload.get("planner") or configured.get("planner") or "api"
+                if planner == "flash_evolve":
+                    planner = configured.get("flash_slow_planner") or "codex"
                 result = check_llm(
                     LlmCheckRequest(
-                        planner=str(
-                            payload.get("planner") or configured.get("planner") or "api"
-                        ),
+                        planner=str(planner),
                         model=(payload.get("model") or configured.get("model") or None),
                         base_url=self._llm_check_base_url or None,
                     )

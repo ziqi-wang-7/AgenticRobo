@@ -43,6 +43,11 @@ MCP_TOOL_PREFIX = "mcp__rpent__"
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 
 
+def effective_planner(planner: str, flash_slow_planner: str = "codex") -> str:
+    """Return the backend that handles model requests for this planner."""
+    return flash_slow_planner if planner == "flash_evolve" else planner
+
+
 def resolve_model(
     planner: str,
     model: str | None,
@@ -50,7 +55,7 @@ def resolve_model(
     flash_slow_planner: str = "codex",
 ) -> str | None:
     """Resolve the model using the planner's explicit/environment precedence."""
-    effective = flash_slow_planner if planner == "flash_evolve" else planner
+    effective = effective_planner(planner, flash_slow_planner)
     return model or (os.environ.get("CODEX_MODEL") if effective == "codex" else None)
 
 
@@ -331,7 +336,7 @@ def build_planner(
         resolved_flash_dir = (
             Path(flash_memory_dir)
             if flash_memory_dir is not None
-            else get_memory_dir(robot_name) / "flash_evolved"
+            else Path(memory_dir or get_memory_dir(robot_name)) / "flash_evolved"
         )
         return FlashEvolvePlanner(
             recipe_tag=recipe_tag,

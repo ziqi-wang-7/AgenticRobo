@@ -112,6 +112,17 @@ def prepare_memory(args: argparse.Namespace, config: RunConfig) -> None:
     )
     if args.planner == "flash":
         replay_directory(root)
+    elif args.planner == "flash_evolve":
+        # Keep writable plans scoped to this corpus revision and outside its
+        # checksum-verified snapshot.
+        if getattr(args, "flash_memory_dir", None) is None:
+            args.flash_memory_dir = root.with_name(f"{root.name}.flash_evolved")
+        elif getattr(args, "flash_evolve", True) and Path(
+            args.flash_memory_dir
+        ).expanduser().resolve().is_relative_to(root):
+            raise ValueError(
+                "--flash-memory-dir must be outside the verified HF corpus when evolution is enabled"
+            )
     config.prompt_vars["memory_dir"] = root
     config.prompt_vars["memory_version"] = version
 
@@ -392,9 +403,12 @@ def main(argv: list[str] | None = None) -> int:
     sync.add_argument("--model", default=None)
     sync.add_argument(
         "--planner",
-        choices=["api", "codex", "claude_code", "flash"],
+        choices=["api", "codex", "claude_code", "flash", "flash_evolve"],
         default="api",
         help="Planner backend (default: api); codex uses CODEX_MODEL when --model is omitted.",
+    )
+    sync.add_argument(
+        "--flash-slow-planner", choices=("api", "codex", "claude_code"), default="codex"
     )
     sync.add_argument("--revision", default="main", help="Hub commit, tag or branch.")
     sync.add_argument(
@@ -402,7 +416,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     version = select_version(
-        args.memory_version, model=args.model, planner=args.planner
+        args.memory_version,
+        model=args.model,
+        planner=args.planner,
+        flash_slow_planner=args.flash_slow_planner,
     )
     root = sync_version(
         version=version,

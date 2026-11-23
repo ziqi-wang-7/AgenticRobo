@@ -147,6 +147,109 @@ class FakeLiberoToolkit:
         )
 
 
+@pytest.mark.parametrize("outcome", ["tool_error", "truncation", "solved"])
+def test_pick_retry_stops_at_the_first_error_or_terminal_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    from robots.libero.flash.replay import replay_with_evolution
+
+    toolkit = FakeLiberoToolkit(
+        tmp_path, memory_root=tmp_path, anchors_xyz={}, fail_first_pick_prompt="pick"
+    )
+    execute_tool = toolkit.execute_tool
+    calls = []
+
+    def execute_with_retry_event(name: str, args: dict[str, Any]) -> ToolResult:
+        calls.append(name)
+        if calls == ["move_to", "pi0_pick", "move_to"] and outcome == "tool_error":
+            return ToolResult(data={"error": "unreachable on retry"})
+        raw = execute_tool(name, args)
+        if len(calls) == 3:
+            if outcome == "truncation":
+                toolkit.state.latest_record().truncated = True
+            elif outcome == "solved":
+                toolkit._solved = True
+        return raw
+
+    monkeypatch.setattr(toolkit, "execute_tool", execute_with_retry_event)
+    result = replay_with_evolution(
+        toolkit,
+        None,
+        {
+            "plan": [
+                {"action": "move_to", "arguments": {"xyz": [0.0, 0.0, 0.7]}},
+                {"action": "pi0_pick", "arguments": {"prompt": "pick"}},
+                {"action": "release", "arguments": {}},
+            ],
+            "reference": {},
+            "locator_of": {},
+        },
+    )
+    assert calls == ["move_to", "pi0_pick", "move_to"]
+    assert result["executed_steps"] == len(calls)
+    if outcome == "tool_error":
+        assert result["mode"] == "needs_handover"
+        assert result["failure"]["failure_kind"] == "action_error"
+        assert result["failure"]["failed_action"] == "move_to"
+        assert "unreachable on retry" in result["failure"]["detail"]
+    else:
+        assert result["mode"] == (
+            "flash_truncated" if outcome == "truncation" else "flash_fast"
+        )
+
+
+def test_recovery_uses_its_observed_anchor_and_recorded_grasp(tmp_path: Path) -> None:
+    from robots.libero.flash.replay import replay_with_evolution
+
+    toolkit = FakeLiberoToolkit(
+        tmp_path, memory_root=tmp_path, anchors_xyz={"rim": [0.16, 0.02, 0.5]}
+    )
+    # The slow planner used a wrist-only reading after the main path moved the arm.
+    # Its taught grasp has a different acceptance threshold from the base Flash pick.
+    branch = {
+        "branch_id": "rim-grasp",
+        "anchors": [{"phrase": "rim", "camera": "wrist"}],
+        "actions": [
+            {
+                "action": "move_to",
+                "anchor": "rim",
+                "anchor_distance": 0.01,
+                "offset": [0, 0.01],
+                "arguments": {"xyz": [0.25, 0.20, 0.7]},
+            },
+            {
+                "action": "pi0_pick",
+                "arguments": {"prompt": "pick", "lift_thresh": 0.08},
+            },
+            {"action": "release", "arguments": {}},
+        ],
+    }
+    result = replay_with_evolution(
+        toolkit,
+        None,
+        {
+            "plan": [{"action": "move_to", "arguments": {"xyz": [0.0, 0.0, 0.7]}}],
+            "reference": {},
+            "locator_of": {},
+        },
+        branch_matcher=lambda *_args, **_kwargs: branch,
+    )
+    assert result["mode"] == "flash_branch"
+    assert result["failure_step"] == 1
+    assert [name for name, _ in toolkit.executed] == [
+        "move_to",
+        "segment",
+        "move_to",
+        "pi0_pick",
+        "release",
+    ]
+    assert toolkit.executed[1][1]["step"] == result["failure_step"]
+    assert toolkit.executed[1][1]["camera"] == "wrist"
+    assert toolkit.executed[2][1]["xyz"] == pytest.approx([0.16, 0.03, 0.7])
+    assert toolkit.executed[3][1] == {"prompt": "pick", "lift_thresh": 0.08}
+    assert result["executed_steps"] == len(toolkit.executed)
+
+
 def _write_seed0_task_specific(memory_root: Path) -> None:
     """Create a seed-0 audit + recipe pair mimicking GPT_6_astra_low."""
     ts = memory_root / "task-specific"
@@ -197,7 +300,12 @@ def _write_seed0_task_specific(memory_root: Path) -> None:
     )
 
 
-def test_bootstrap_and_fast_zero_token_solve(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "plate_xy", [[-0.05, 0.22], [0.20, -0.02]], ids=["apart", "adjacent"]
+)
+def test_bootstrap_and_fast_zero_token_solve(
+    tmp_path: Path, plate_xy: list[float]
+) -> None:
     memory_root = tmp_path / "corpus"
     store_dir = tmp_path / "flash_evolved"
     _write_seed0_task_specific(memory_root)
@@ -212,7 +320,7 @@ def test_bootstrap_and_fast_zero_token_solve(tmp_path: Path) -> None:
         memory_root=memory_root,
         anchors_xyz={
             "the black bowl": [0.18, -0.02, 0.50],
-            "the plate": [-0.05, 0.22, 0.50],
+            "the plate": [*plate_xy, 0.50],
         },
     )
     slow_calls = 0
@@ -237,7 +345,7 @@ def test_bootstrap_and_fast_zero_token_solve(tmp_path: Path) -> None:
     # Verify anchor-relative re-grounding moved to shifted bowl/plate coords
     moves = [args["xyz"] for name, args in tk.executed if name == "move_to"]
     assert moves[0][:2] == pytest.approx([0.18, -0.02], abs=1e-3)
-    assert moves[1][:2] == pytest.approx([-0.05, 0.22], abs=1e-3)
+    assert moves[1][:2] == pytest.approx(plate_xy, abs=1e-3)
 
 
 def test_closed_loop_handover_patch_and_zero_token_branch_hit(tmp_path: Path) -> None:
@@ -389,8 +497,17 @@ def test_motion_stall_triggers_handover_and_bad_branch_demotion(tmp_path: Path) 
     assert match_recovery_branch(program, out["trace"]["failure"]) is None
 
 
-def test_cold_start_compiles_new_plan_for_subsequent_seeds(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "mug_visible_in",
+    [None, "wrist", "agentview"],
+    ids=["inferred", "wrist-reading", "wrist-reading-out-of-view"],
+)
+def test_cold_start_compiles_new_plan_for_subsequent_seeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mug_visible_in: str | None
+) -> None:
     """When a task has no seed-0 plan (like libero_10_swap/t6), slow solve compiles one."""
+    from robots.libero.tools import LiberoPrimitives
+
     empty_corpus = tmp_path / "empty_corpus"
     empty_corpus.mkdir()
     store_dir = tmp_path / "flash_evolved"
@@ -406,6 +523,17 @@ def test_cold_start_compiles_new_plan_for_subsequent_seeds(tmp_path: Path) -> No
     )
 
     def slow_cold(_msg: str) -> PlannerResult:
+        if mug_visible_in is not None:
+            tk1.state.save(
+                "segment_00.json",
+                {
+                    "found": True,
+                    "mode": "text",
+                    "prompt": "the yellow and white mug",
+                    "camera": "wrist",
+                    "world_xyz": [0.12, -0.04, 0.5],
+                },
+            )
         tk1.execute_tool("move_to", {"xyz": [0.12, -0.04, 0.70], "gripper": -1})
         tk1.execute_tool("pi0_pick", {"prompt": "pick up the yellow and white mug"})
         tk1.execute_tool("set_gripper", {"gripper": 1})
@@ -444,6 +572,18 @@ def test_cold_start_compiles_new_plan_for_subsequent_seeds(tmp_path: Path) -> No
         },
         task_language="put the yellow and white mug on the plate",
     )
+    execute_tool = tk2.execute_tool
+    mug_cameras = []
+
+    def replay_tool(name: str, args: dict[str, Any]) -> ToolResult:
+        getattr(LiberoPrimitives, name).args_schema.model_validate(args, strict=True)
+        if name == "segment" and args["prompt"] == "the yellow and white mug":
+            mug_cameras.append(args["camera"])
+            if mug_visible_in and args["camera"] != mug_visible_in:
+                return ToolResult(data={"found": False})
+        return execute_tool(name, args)
+
+    monkeypatch.setattr(tk2, "execute_tool", replay_tool)
     out2 = run_flash_evolve(
         tk2,
         "goal_task_t3_s2",
@@ -456,6 +596,13 @@ def test_cold_start_compiles_new_plan_for_subsequent_seeds(tmp_path: Path) -> No
     )
     assert out2["done"] is True
     assert out2["trace"]["execution_mode"] == "flash_fast"
+    expected_cameras = ["wrist"] if mug_visible_in else ["agentview"]
+    if mug_visible_in == "agentview":
+        expected_cameras.append("agentview")
+    assert mug_cameras == expected_cameras
+    assert next(args["xyz"] for name, args in tk2.executed if name == "move_to")[
+        :2
+    ] == pytest.approx([0.15, 0.01])
 
 
 def test_patch_merges_spatial_bounds_on_duplicate_signature(tmp_path: Path) -> None:
@@ -544,6 +691,50 @@ def test_flash_evolve_planner_wrapper_and_zero_token_stats(
     assert res.stats["execution_mode"] == "flash_fast"
 
 
+def test_claude_handover_accounts_for_cached_input_in_local_store(
+    tmp_path, monkeypatch
+):
+    from rpent.dashboard.events import NullDashboardEventSink
+    from rpent.planner.base import build_planner
+    from rpent.planner.claude_code import ClaudeCodePlanner
+
+    corpus = tmp_path / "corpus"
+    toolkit = FakeLiberoToolkit(
+        tmp_path / "episode", memory_root=corpus, anchors_xyz={}
+    )
+    monkeypatch.setattr(
+        ClaudeCodePlanner,
+        "solve",
+        lambda self, **kwargs: PlannerResult(
+            stats={
+                "total_input_tokens": 5,
+                "total_cache_creation_input_tokens": 7,
+                "total_cache_read_input_tokens": 11,
+                "total_output_tokens": 3,
+                "total_cost_usd": 0.01,
+            }
+        ),
+    )
+    planner = build_planner(
+        "flash_evolve",
+        flash_slow_planner="claude_code",
+        memory_dir=corpus,
+        output_dir=tmp_path,
+        recipe_tag="spatial_task_t0_s1",
+        robot_name="libero",
+        dashboard_events=NullDashboardEventSink(),
+    )
+    result = planner.solve(
+        toolkit=toolkit, system_prompt="", user_message="task", max_turns=1
+    )
+    assert result.error is None
+    assert result.stats["execution_mode"] == "slow_cold_start_failed"
+    assert Path(result.stats["flash_memory_dir"]) == corpus / "flash_evolved"
+    assert result.stats["total_input_tokens"] == 23
+    assert result.stats["total_cached_input_tokens"] == 11
+    assert result.stats["total_cost_usd"] == 0.01
+
+
 def test_libero_parse_config_allows_flash_evolve_without_molmo(tmp_path: Path) -> None:
     from robots.libero.robot_spec import _parse_config
 
@@ -583,7 +774,7 @@ def test_repro_command_and_summarize_batch(tmp_path: Path) -> None:
         "flash_slow_planner": "codex",
         "flash_memory_dir": str(batch / "flash_memory"),
         "flash_evolve_enabled": True,
-        "planned_episodes": 2,
+        "planned_episodes": 4,
         "episodes": [
             {
                 "suite": "libero_spatial_task",
@@ -596,6 +787,18 @@ def test_repro_command_and_summarize_batch(tmp_path: Path) -> None:
                 "task": 0,
                 "seed": 2,
                 "episode_id": "s2-t0",
+            },
+            {
+                "suite": "libero_spatial_task",
+                "task": 1,
+                "seed": 1,
+                "episode_id": "s1-t1",
+            },
+            {
+                "suite": "libero_spatial_task",
+                "task": 1,
+                "seed": 2,
+                "episode_id": "s2-t1",
             },
         ],
     }
@@ -612,6 +815,28 @@ def test_repro_command_and_summarize_batch(tmp_path: Path) -> None:
     ep2 = batch / "episodes" / "s2-t0"
     ep1.mkdir(parents=True)
     ep2.mkdir(parents=True)
+    for directory, input_tokens, output_tokens in [(ep1, 10000, 500), (ep2, 0, 0)]:
+        (directory / "metrics.json").write_text(
+            json.dumps(
+                {
+                    "valid": True,
+                    "native_success": True,
+                    "total_input_tokens": input_tokens,
+                    "total_output_tokens": output_tokens,
+                }
+            ),
+            encoding="utf-8",
+        )
+    for episode_id in ("s1-t1", "s2-t1"):
+        directory = batch / "episodes" / episode_id
+        directory.mkdir()
+        (directory / "flash_evolve_trace.json").write_text(
+            json.dumps({"done": True, "execution_mode": "flash_fast"}),
+            encoding="utf-8",
+        )
+    (batch / "episodes" / "s1-t1" / "metrics.json").write_text(
+        json.dumps({"valid": False, "native_success": True}), encoding="utf-8"
+    )
     (ep1 / "flash_evolve_trace.json").write_text(
         json.dumps(
             {
@@ -637,9 +862,106 @@ def test_repro_command_and_summarize_batch(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     summary = summarize_batch(batch)
+    assert summary["completed"] == 2
+    assert summary["infrastructure_errors"] == 1
+    assert summary["pending"] == 1
     assert summary["solved"] == 2
     assert summary["success_rate"] == 1.0
     assert summary["per_seed"]["1"]["zero_token_solved"] == 0
     assert summary["per_seed"]["2"]["zero_token_solved"] == 1
     assert summary["per_seed"]["2"]["branch_hit_solved"] == 1
     assert summary["total_input_tokens"] == 10000
+
+
+@pytest.mark.parametrize(
+    ("condition", "slow_planner", "slow_result", "requires_spans"),
+    [
+        ("original_harnessvla_full", "codex", None, True),
+        ("flash_evolve", "codex", None, False),
+        ("flash_evolve", "codex", {"stats": {}}, True),
+        ("flash_evolve", "api", {"stats": {}}, False),
+        ("flash_evolve", "claude_code", {"stats": {}}, False),
+    ],
+)
+def test_batch_telemetry_matches_executed_planner(
+    tmp_path, condition, slow_planner, slow_result, requires_spans
+) -> None:
+    from repro.liberopro_baseline import _telemetry_error
+
+    plan = {"condition": condition, "flash_slow_planner": slow_planner}
+    coverage = {
+        "sampling_spans": 0,
+        "llm_request_spans": 0,
+        "vla_client_calls": 2,
+        "vla_server_calls": 2,
+    }
+    (tmp_path / "flash_evolve_trace.json").write_text(
+        json.dumps({"slow_result": slow_result}), encoding="utf-8"
+    )
+    error = _telemetry_error(plan, tmp_path, coverage)
+    assert error == ("Codex request telemetry missing" if requires_spans else None)
+    coverage.update(sampling_spans=1, llm_request_spans=1, vla_server_calls=1)
+    assert (
+        _telemetry_error(plan, tmp_path, coverage) == "VLA telemetry coverage mismatch"
+    )
+
+
+def test_prepare_stream_uses_backend_model_and_unique_episode_ids(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from repro.flash_evolve import prepare
+    from repro.liberopro_baseline import write
+
+    monkeypatch.setattr("repro.flash_evolve.now", lambda: "test-time")
+    monkeypatch.setattr("repro.liberopro_baseline.now", lambda: "test-time")
+    baseline = tmp_path / "baseline"
+    snapshot = tmp_path / "frozen-hf"
+    write(
+        baseline / "plan.json",
+        {
+            "model": "gpt-6-astra",
+            "condition": "original_harnessvla_full",
+            "planned_episodes": 80,
+            "runtime_memory_root": str(snapshot),
+            "episodes": [
+                {
+                    "suite": f"suite_{s}",
+                    "task": t,
+                    "seed": 1,
+                    "initial_scene": "frozen.npz",
+                }
+                for s in range(8)
+                for t in range(10)
+            ],
+            "deployment": {"environment_gpu": 1, "vla_port": 8420, "sam3_port": 8414},
+        },
+    )
+    output = tmp_path / "batch"
+    args = argparse.Namespace(
+        baseline=baseline,
+        output=output,
+        suite="suite_0",
+        task=0,
+        seeds=[1, 1],
+        flash_memory_dir=snapshot / "flash",
+        slow_planner="claude_code",
+        model=None,
+        evolve=False,
+        molmo_endpoint=None,
+    )
+    with pytest.raises(ValueError, match="unique"):
+        prepare(args)
+    args.seeds = [1, 2]
+    args.evolve = True
+    with pytest.raises(ValueError, match="outside the frozen HF snapshot"):
+        prepare(args)
+    args.evolve = False
+    prepare(args)
+    assert not args.flash_memory_dir.exists()
+    plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+    assert plan["model"] == "sonnet"
+    argv = plan["example_command"]
+    assert argv[argv.index("--model") + 1] == plan["model"]
+    first, second = plan["episodes"]
+    assert first["episode_id"] != second["episode_id"]
+    assert "initial_scene" in first and "initial_scene" not in second

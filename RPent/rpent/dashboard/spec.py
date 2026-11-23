@@ -46,6 +46,7 @@ class RuntimeComponentSpecRequired(TypedDict):
 
 class RuntimeComponentSpec(RuntimeComponentSpecRequired, total=False):
     planners: tuple[str, ...]
+    requires_arg: str
 
 
 class DashboardSpecRequired(TypedDict):

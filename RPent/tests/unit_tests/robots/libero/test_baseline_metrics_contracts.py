@@ -30,7 +30,7 @@ from profiling.libero_metrics import (
 from repro.liberopro_baseline import command
 
 
-def fixture_run(tmp_path, *, error=None, native=False, code=0):
+def fixture_run(tmp_path, *, error=None, native=False, code=0, stream_event=None):
     run = tmp_path / "episode"
     run.mkdir()
     services = tmp_path / "services"
@@ -51,6 +51,8 @@ def fixture_run(tmp_path, *, error=None, native=False, code=0):
     (run / "transcript_test.json").write_text(
         json.dumps({"error": error, "environment_success": native, "stats": stats})
     )
+    if stream_event:
+        (run / "claude.stream.jsonl").write_text(json.dumps(stream_event) + "\n")
     events = [
         {"kind": "env_reset"},
         {"kind": "env_step", "steps": 1, "native_success": native},
@@ -110,6 +112,43 @@ def test_budget_failure_counts_but_quota_error_is_infrastructure(tmp_path):
         and s["pending"] == 78
     )
     assert s["task_success_rate"] == 0 and s["failure_rate"] == 1
+
+
+@pytest.mark.parametrize(
+    ("subtype", "transport_error", "budget_exhausted"),
+    [
+        ("error_max_budget_usd", None, True),
+        ("error_max_budget_usd", "ResultError: maximum spend reached", True),
+        ("error_during_execution", "ResultError: account quota exceeded", False),
+    ],
+)
+def test_claude_episode_spend_cap_and_provider_quota(
+    tmp_path, subtype, transport_error, budget_exhausted
+):
+    from claude_agent_sdk import ResultMessage
+
+    from rpent.dashboard.events import NullDashboardEventSink
+    from rpent.planner.claude_code import _message_to_json, _Recorder
+
+    result = ResultMessage(
+        subtype=subtype,
+        is_error=True,
+        duration_ms=5,
+        duration_api_ms=1,
+        num_turns=1,
+        session_id="test",
+    )
+    recorder = _Recorder(max_turns=100, dashboard_events=NullDashboardEventSink())
+    recorder.observe(result)
+    assert recorder.error == f"Claude Agent SDK result {subtype}"
+    metrics = fixture_run(
+        tmp_path,
+        error=transport_error or recorder.error,
+        code=1,
+        stream_event=_message_to_json(result),
+    )
+    assert metrics["budget_exhausted"] is budget_exhausted
+    assert metrics["valid"] is budget_exhausted
 
 
 def test_p95_is_pooled_over_calls_not_mean_of_episode_percentiles(tmp_path):

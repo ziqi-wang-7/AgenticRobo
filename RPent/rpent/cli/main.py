@@ -54,7 +54,7 @@ from rpent.dashboard.events import (
 )
 from rpent.evaluation import RunFinalizationContext
 from rpent.memory import MemoryManager
-from rpent.planner.base import REASONING_EFFORTS, build_planner
+from rpent.planner.base import REASONING_EFFORTS, build_planner, effective_planner
 from rpent.planner.check import BASE_URL_ENV_BY_PLANNER
 from rpent.robots import enumerate_robots, get_robot_spec, get_toolkit
 from rpent.utils.logging import get_logger, init_output_dir
@@ -147,7 +147,8 @@ def _build_argparser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Writable directory storing evolved Flash plans for --planner flash_evolve "
-        "(defaults to <memory_dir>/flash_evolved).",
+        "(default: flash_evolved under the local corpus, or a sibling directory "
+        "of the selected HF snapshot).",
     )
     ap.add_argument(
         "--flash-evolve",
@@ -406,17 +407,9 @@ def main() -> int:
             )
         if sys.stdin is None or not sys.stdin.isatty():
             parser.error("This robot requires a TTY for operator confirmation.")
-    native_cli = args.interactive and args.planner == "api"
-    if args.base_url and (
-        args.planner in BASE_URL_ENV_BY_PLANNER
-        or (
-            args.planner == "flash_evolve"
-            and args.flash_slow_planner in BASE_URL_ENV_BY_PLANNER
-        )
-    ):
-        effective = (
-            args.flash_slow_planner if args.planner == "flash_evolve" else args.planner
-        )
+    effective = effective_planner(args.planner, args.flash_slow_planner)
+    native_cli = args.interactive and effective == "api"
+    if args.base_url and effective in BASE_URL_ENV_BY_PLANNER:
         parser.error(
             "--base-url applies to the 'api' planner only; "
             f"{effective} reads its endpoint from "

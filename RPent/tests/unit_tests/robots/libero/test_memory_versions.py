@@ -84,7 +84,7 @@ def hub(tmp_path, monkeypatch):
         for name, content in contents.items():
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content)
+            path.write_bytes(content.encode())
         files[version] = {
             "files": {
                 name: hashlib.sha256(content.encode()).hexdigest()
@@ -110,7 +110,7 @@ def hub(tmp_path, monkeypatch):
         return SimpleNamespace(
             sha=state.sha,
             siblings=[
-                SimpleNamespace(rfilename=str(p.relative_to(snapshot)))
+                SimpleNamespace(rfilename=p.relative_to(snapshot).as_posix())
                 for p in snapshot.rglob("*")
                 if p.is_file()
             ],
@@ -328,7 +328,7 @@ def test_task_model_changes_resolve_root_again_without_changing_effort(
         prompt = spec.prompts.render(
             "system", variables={**config.prompt_vars, "output_dir": config.output_dir}
         )
-        assert str(root / "MEMORY.md") in prompt
+        assert (root / "MEMORY.md").as_posix() in prompt.replace("\\", "/")
         assert "MULTI-ATTEMPT EXPLORE MODE" not in prompt
         bound = robot_spec.get_toolkit(
             runtime_kwargs={},
@@ -349,7 +349,7 @@ def test_task_model_changes_resolve_root_again_without_changing_effort(
         prompt = spec.prompts.render(
             "system", variables={**config.prompt_vars, "output_dir": config.output_dir}
         )
-        assert str(root / "MEMORY.md") in prompt
+        assert (root / "MEMORY.md").as_posix() in prompt.replace("\\", "/")
         assert ("MULTI-ATTEMPT EXPLORE MODE" in prompt) is explore
     assert len(hub.calls) == downloaded
 
@@ -486,6 +486,8 @@ def test_flash_prepares_the_version_with_published_replay_assets(
         (["--planner", "codex", "--model", "gpt-5.5"], GPT5),
         (["--planner", "codex", "--memory-version", GPT5], GPT5),
         (["--planner", "api", "--model", "openai:gpt-6-astra"], ASTRA),
+        (["--planner", "flash_evolve"], ASTRA),
+        (["--planner", "flash_evolve", "--flash-slow-planner", "claude_code"], GPT5),
     ],
 )
 @pytest.mark.parametrize("revision", [None, "a" * 40])
@@ -518,8 +520,28 @@ def test_sync_and_run_use_same_model_selection(
     loading.prepare_run_memory(args, spec, config)
     assert selected == [(expected, revision or "main")] * 2
     assert config.prompt_vars["memory_dir"] == tmp_path / expected
+    if args.planner == "flash_evolve":
+        assert args.flash_memory_dir == tmp_path / f"{expected}.flash_evolved"
     if args.planner == "codex":
         assert args.model == ("gpt-5.5" if "--model" in options else "gpt-6-astra")
+
+
+def test_flash_evolve_protects_verified_snapshot(hub, tmp_path, monkeypatch):
+    monkeypatch.setattr(memory_cli, "get_memory_dir", lambda _: tmp_path / "cache")
+    spec = get_robot_spec()
+    args = Namespace(
+        planner="flash_evolve", model=None, memory_version=ASTRA, memory_repo=None
+    )
+    config = SimpleNamespace(prompt_vars={})
+    loading.prepare_run_memory(args, spec, config)
+    root = config.prompt_vars["memory_dir"]
+    assert args.flash_memory_dir == root.with_name(f"{ASTRA}.flash_evolved")
+    args.flash_memory_dir = root / "flash"
+    with pytest.raises(ValueError, match="outside the verified HF corpus"):
+        loading.prepare_run_memory(args, spec, config)
+    args.flash_evolve = False
+    loading.prepare_run_memory(args, spec, config)
+    assert args.flash_memory_dir == root / "flash"
 
 
 def test_manifest_published_file_set_is_required(hub, tmp_path):

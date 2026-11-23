@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,8 @@ def prepare(args: argparse.Namespace) -> None:
     seeds = list(args.seeds or [1])
     if any(seed < 1 for seed in seeds):
         raise ValueError("Evaluation seeds must be >= 1 (seed 0 is reference)")
+    if len(seeds) != len(set(seeds)):
+        raise ValueError("Each evaluation seed must be unique")
 
     plan = json.loads((baseline / "plan.json").read_text(encoding="utf-8"))
     if (
@@ -73,28 +76,30 @@ def prepare(args: argparse.Namespace) -> None:
         if args.flash_memory_dir is not None
         else output / "flash_memory"
     )
+    if args.evolve and flash_memory_dir.is_relative_to(
+        Path(plan["runtime_memory_root"]).resolve()
+    ):
+        raise ValueError("Writable Flash memory must be outside the frozen HF snapshot")
 
     names = set(plan.get("source_sha256") or ())
     names.update(
-        {
-            "rpent/planner/base.py",
-            "rpent/planner/flash_evolve.py",
-            "rpent/cli/main.py",
-            "rpent/robots/robot_spec.py",
-            "robots/libero/robot_spec.py",
-            "robots/libero/memory.py",
-            "robots/libero/flash/__init__.py",
-            "robots/libero/flash/replay.py",
-            "robots/libero/flash/evolve.py",
-            "repro/liberopro_baseline.py",
-            "repro/flash_evolve.py",
-        }
+        subprocess.check_output(["git", "ls-files", "-z", "rpent", "robots"], cwd=ROOT)
+        .decode()
+        .split("\0")
     )
+    names.update({"repro/liberopro_baseline.py", "repro/flash_evolve.py"})
 
+    baseline_model = plan["model"]
+    default_model = {
+        "codex": baseline_model,
+        "api": f"openai:{baseline_model}",
+        "claude_code": "sonnet",
+    }[args.slow_planner]
     plan.update(
         created_at=now(),
         condition="flash_evolve",
         planner="flash_evolve",
+        model=args.model or default_model,
         flash_slow_planner=args.slow_planner,
         flash_memory_dir=str(flash_memory_dir),
         flash_evolve_enabled=bool(args.evolve),
@@ -106,6 +111,9 @@ def prepare(args: argparse.Namespace) -> None:
         episodes=episodes,
         planned_episodes=len(episodes),
         seeds=seeds,
+        source_revision=subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
+        ).strip(),
         source_sha256={
             name: sha(ROOT / name) for name in sorted(names) if (ROOT / name).is_file()
         },
@@ -113,7 +121,8 @@ def prepare(args: argparse.Namespace) -> None:
     )
 
     output.mkdir(parents=True)
-    flash_memory_dir.mkdir(parents=True, exist_ok=True)
+    if args.evolve:
+        flash_memory_dir.mkdir(parents=True, exist_ok=True)
     write(output / "plan.json", plan)
     plan["example_command"] = command(output, episodes[0], plan["deployment"])
     write(output / "plan.json", plan)
@@ -152,22 +161,31 @@ def summarize_batch(batch: Path) -> dict[str, Any]:
     total_output_tokens = 0
     completed = 0
     solved = 0
+    infrastructure_errors = 0
 
     for cell in plan["episodes"]:
         ep_dir = batch / "episodes" / cell["episode_id"]
-        trace_path = ep_dir / "flash_evolve_trace.json"
-        if not trace_path.is_file():
+        metrics_path = ep_dir / "metrics.json"
+        if not metrics_path.is_file():
             continue
-        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+        if not metrics["valid"]:
+            infrastructure_errors += 1
+            continue
+        trace_path = ep_dir / "flash_evolve_trace.json"
+        trace = (
+            json.loads(trace_path.read_text(encoding="utf-8"))
+            if trace_path.is_file()
+            else {}
+        )
         completed += 1
-        is_solved = bool(trace.get("done"))
+        is_solved = metrics["native_success"] is True
         solved += int(is_solved)
         mode = str(trace.get("execution_mode", "unknown"))
         modes[mode] += 1
         evolved[str(trace.get("evolved_action", "none"))] += 1
-        slow_stats = (trace.get("slow_result") or {}).get("stats") or {}
-        in_tok = int(slow_stats.get("total_input_tokens", 0))
-        out_tok = int(slow_stats.get("total_output_tokens", 0))
+        in_tok = metrics["total_input_tokens"]
+        out_tok = metrics["total_output_tokens"]
         total_input_tokens += in_tok
         total_output_tokens += out_tok
         by_seed[int(cell["seed"])].append(
@@ -205,8 +223,10 @@ def summarize_batch(batch: Path) -> dict[str, Any]:
         "batch": str(batch),
         "planned": int(plan.get("planned_episodes", len(plan["episodes"]))),
         "completed": completed,
+        "infrastructure_errors": infrastructure_errors,
+        "pending": len(plan["episodes"]) - completed - infrastructure_errors,
         "solved": solved,
-        "success_rate": round(solved / completed, 4) if completed else 0.0,
+        "success_rate": round(solved / completed, 4) if completed else None,
         "execution_modes": dict(modes),
         "evolved_actions": dict(evolved),
         "total_input_tokens": total_input_tokens,
@@ -226,6 +246,7 @@ def main() -> None:
     prep.add_argument(
         "--slow-planner", choices=("codex", "api", "claude_code"), default="codex"
     )
+    prep.add_argument("--model", help="Override the slow planner's model ID.")
     prep.add_argument("--seeds", type=int, nargs="+", default=[1])
     prep.add_argument("--suite", default=None)
     prep.add_argument("--task", type=int, default=None)

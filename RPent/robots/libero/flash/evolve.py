@@ -34,6 +34,7 @@ import json
 import math
 import os
 import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -50,7 +51,7 @@ from robots.libero.flash.generate import (
     generate_flash_plan,
 )
 from robots.libero.flash.replay import _CELL, load, replay_with_evolution
-from robots.libero.memory import replay_directory
+from robots.libero.recovery_evidence import motion_alert
 
 try:
     import fcntl
@@ -68,6 +69,7 @@ PRIMITIVE_ACTIONS = frozenset(
         "set_gripper",
         "rotate_wrist",
         "rotate_pitch",
+        "execute_action",
     }
 )
 # Maximum spatial slack (meters) when matching a live anchor/eef to a learned
@@ -135,25 +137,24 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
         tmp.unlink(missing_ok=True)
 
 
-def _action_signature(actions: Sequence[Mapping[str, Any]]) -> str:
+def _action_signature(
+    actions: Sequence[Mapping[str, Any]], anchors: Sequence[Mapping[str, Any]] = ()
+) -> str:
     """Stable digest of a branch's anchored action sequence for deduplication."""
     canonical = []
     for item in actions:
         args = dict(item.get("arguments") or {})
-        entry: dict[str, Any] = {"action": item.get("action")}
+        entry: dict[str, Any] = {"action": item.get("action"), "arguments": args}
         if item.get("anchor"):
             entry["anchor"] = item["anchor"]
-            entry["offset"] = [
-                round(float(v), 2) for v in (item.get("offset") or (0.0, 0.0))[:2]
-            ]
-        elif "xyz" in args and isinstance(args["xyz"], list) and len(args["xyz"]) == 3:
-            entry["z"] = round(float(args["xyz"][2]), 2)
-        if "prompt" in args:
-            entry["prompt"] = str(args["prompt"]).strip().lower()
-        if "gripper" in args:
-            entry["gripper"] = args["gripper"]
+            entry["offset"] = item["offset"]
+            # Replay replaces only the recorded XY with anchor + offset.
+            entry["z"] = args.pop("xyz")[2]
         canonical.append(entry)
-    blob = json.dumps(canonical, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    surveys = sorted((a["phrase"], a.get("camera", "agentview")) for a in anchors)
+    blob = json.dumps([canonical, surveys], sort_keys=True, ensure_ascii=False).encode(
+        "utf-8"
+    )
     return hashlib.sha256(blob).hexdigest()[:12]
 
 
@@ -183,8 +184,10 @@ def _within_bounds(
     margin: float = DEFAULT_SPATIAL_MARGIN_M,
 ) -> tuple[bool, float]:
     """Return whether ``xy`` falls within ``bounds`` expanded by ``margin``."""
-    if xy is None or bounds is None:
+    if bounds is None:
         return True, 0.0
+    if xy is None:
+        return False, math.inf
     x, y = float(xy[0]), float(xy[1])
     dx = max(bounds[0][0] - x, 0.0, x - bounds[0][1])
     dy = max(bounds[1][0] - y, 0.0, y - bounds[1][1])
@@ -218,45 +221,51 @@ def bootstrap_plan_from_corpus(
         if plan_file.is_file() and anchors_file.is_file():
             return True
 
-        # 2. Copy from read-only flash/ or task_card/ directory if available.
-        try:
-            source_replay = replay_directory(memory_root)
-        except ValueError:
-            source_replay = None
-        if source_replay is not None:
-            src_plan = source_replay / f"{plan_name}_plan.json"
-            src_anchors = source_replay / f"{plan_name}_anchors.json"
-            if src_plan.is_file() and src_anchors.is_file():
-                store_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_plan, plan_file)
-                shutil.copy2(src_anchors, anchors_file)
-                note(f"bootstrapped {plan_name} from {source_replay}")
-                return True
-
-        # 3. Compile from seed-0 task-specific audit + recipe (e.g. GPT_6_astra_low).
-        task_specific = memory_root / "task-specific"
-        ref_tag = f"{plan_name}_s0"
-        audit_path = task_specific / f"{ref_tag}.json"
-        recipe_path = task_specific / f"{ref_tag}_recipe.jsonl"
-        if audit_path.is_file() and recipe_path.is_file():
-            try:
-                generate_flash_plan(audit_path, recipe_path, store_dir)
+        # Keep incomplete copies/compilations out of the live store. Frozen
+        # evaluators may be reading it without acquiring a writable lock.
+        with tempfile.TemporaryDirectory(dir=store_dir) as tmp:
+            staging = Path(tmp)
+            for source in (memory_root / "flash", memory_root / "task_card"):
+                if (source / plan_file.name).is_file() and (
+                    source / anchors_file.name
+                ).is_file():
+                    shutil.copyfile(source / plan_file.name, staging / plan_file.name)
+                    shutil.copyfile(
+                        source / anchors_file.name, staging / anchors_file.name
+                    )
+                    note(f"bootstrapped {plan_name} from {source}")
+                    break
+            else:
+                task_specific = memory_root / "task-specific"
+                ref_tag = f"{plan_name}_s0"
+                audit_path = task_specific / f"{ref_tag}.json"
+                recipe_path = task_specific / f"{ref_tag}_recipe.jsonl"
+                if not (audit_path.is_file() and recipe_path.is_file()):
+                    return False
+                try:
+                    generate_flash_plan(audit_path, recipe_path, staging)
+                except ValueError as exc:
+                    note(f"could not compile seed-0 recipe {recipe_path.name}: {exc}")
+                    return False
+                trace_name = f"{plan_name}_trace.md"
+                (staging / trace_name).replace(store_dir / trace_name)
                 note(f"compiled initial Flash plan {plan_name} from {recipe_path.name}")
-                return True
-            except Exception as exc:
-                note(
-                    f"could not compile seed-0 recipe {recipe_path.name} into Flash plan: {exc}"
-                )
-    return False
+            # Plan existence is the publication marker for the completed pair.
+            if not anchors_file.is_file():
+                plan_file.unlink(missing_ok=True)
+            (staging / anchors_file.name).replace(anchors_file)
+            (staging / plan_file.name).replace(plan_file)
+            return True
 
 
 def load_evolving_plan(store_dir: Path, plan_name: str) -> dict[str, Any]:
     """Load a Flash plan together with its schema-v2 recovery branches."""
-    program = load(store_dir, plan_name)
     raw_doc = json.loads((store_dir / f"{plan_name}_plan.json").read_text("utf-8"))
+    program = load(store_dir, plan_name, plan_doc=raw_doc)
     program["schema_version"] = int(raw_doc.get("schema_version", 1))
     program["recovery_branches"] = list(raw_doc.get("recovery_branches") or [])
     program["language"] = str(raw_doc.get("language") or "")
+    program["source"] = raw_doc.get("source") or {}
     program["plan_name"] = plan_name
     return program
 
@@ -303,7 +312,13 @@ def match_recovery_branch(
             or trigger.get("failed_action") == failed_action
         )
         anchor_match = int(not trigger.get("anchor") or trigger.get("anchor") == anchor)
-        if not step_exact and not (action_match and anchor_match):
+        if not (action_match and anchor_match):
+            continue
+        if trigger.get("failed_step_idx") is not None and not step_exact:
+            continue
+        if not step_exact and not (
+            trigger.get("failed_action") and trigger.get("anchor")
+        ):
             continue
 
         bounds = trigger.get("spatial_bounds") or {}
@@ -347,10 +362,22 @@ def _extract_primitive_commands(
         if not isinstance(cmd, dict):
             continue
         action = cmd.get("action")
-        if action not in PRIMITIVE_ACTIONS:
+        result = record.result or {}
+        if (
+            action not in PRIMITIVE_ACTIONS
+            or result.get("error")
+            or result.get("interrupted")
+        ):
+            continue
+        if not record.terminated and (
+            (action == "pi0_pick" and result.get("success") is False)
+            or motion_alert(record)
+        ):
             continue
         commands.append(dict(cmd))
         steps.append(int(record.step_idx))
+        if record.terminated:
+            break
     return commands, steps
 
 
@@ -393,6 +420,7 @@ def compile_recovery_branch(
     cell_tag: str,
     slow_planner: str,
     existing_anchors: Sequence[Mapping[str, Any]] | None = None,
+    measured_anchors: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
     """Compile post-handover slow-planner recovery steps into a Flash branch."""
     raw_commands, step_indices = _extract_primitive_commands(
@@ -401,8 +429,13 @@ def compile_recovery_branch(
     if not raw_commands:
         return None
     anchors = _live_anchors_as_list(live_anchors, existing_anchors)
+    measured_phrases = {a["phrase"] for a in measured_anchors}
+    anchors = [a for a in anchors if a["phrase"] not in measured_phrases]
+    anchors.extend(dict(a) for a in measured_anchors)
     anchored_actions = _attach_moves(raw_commands, anchors)
-    sig = _action_signature(anchored_actions)
+    used_phrases = {action.get("anchor") for action in anchored_actions}
+    branch_anchors = [dict(a) for a in measured_anchors if a["phrase"] in used_phrases]
+    sig = _action_signature(anchored_actions, branch_anchors)
     spatial_bounds: dict[str, Any] = {}
     anchor_bounds = _bounds_from_xy(failure.get("anchor_xy"))
     if anchor_bounds is not None:
@@ -422,6 +455,7 @@ def compile_recovery_branch(
             "spatial_bounds": spatial_bounds,
         },
         "mode": "complete_episode",
+        "anchors": branch_anchors,
         "actions": anchored_actions,
         "provenance": {
             "cell_tag": cell_tag,
@@ -453,15 +487,22 @@ def patch_plan_with_branch(
 
         incoming = dict(branch)
         incoming_trigger = incoming.get("trigger") or {}
+        signature = _action_signature(
+            incoming["actions"], incoming.get("anchors") or ()
+        )
         merged_id: str | None = None
         for existing in branches:
             ex_trigger = existing.get("trigger") or {}
-            if (
-                existing.get("signature") == incoming.get("signature")
-                and ex_trigger.get("failure_kind")
-                == incoming_trigger.get("failure_kind")
-                and ex_trigger.get("failed_step_idx")
-                == incoming_trigger.get("failed_step_idx")
+            if _action_signature(
+                existing["actions"], existing.get("anchors") or ()
+            ) == signature and all(
+                ex_trigger.get(key) == incoming_trigger.get(key)
+                for key in (
+                    "failure_kind",
+                    "failed_step_idx",
+                    "failed_action",
+                    "anchor",
+                )
             ):
                 ex_bounds = dict(ex_trigger.get("spatial_bounds") or {})
                 in_bounds = incoming_trigger.get("spatial_bounds") or {}
@@ -616,8 +657,16 @@ def compile_new_plan_from_state(
         "prompts_without_readings": [],
     }
     with _store_lock(store_dir):
-        _atomic_write_json(store_dir / f"{plan_name}_plan.json", plan_doc)
-        _atomic_write_json(store_dir / f"{plan_name}_anchors.json", anchors_doc)
+        # Another episode may have learned and patched this task while the
+        # slow planner was running. Keep the first complete plan and its history.
+        plan_path = store_dir / f"{plan_name}_plan.json"
+        anchors_path = store_dir / f"{plan_name}_anchors.json"
+        if plan_path.is_file() and anchors_path.is_file():
+            return None
+        if not anchors_path.is_file():
+            plan_path.unlink(missing_ok=True)
+        _atomic_write_json(anchors_path, anchors_doc)
+        _atomic_write_json(plan_path, plan_doc)
     return {
         "plan_name": plan_name,
         "anchors": len(anchors),
@@ -692,29 +741,41 @@ def build_handover_message(
     return base_user_message + handover_block
 
 
-def _extract_segment_anchors_from_state(state: Any) -> list[dict[str, Any]]:
-    """Collect any segment tool readings recorded on ``EnvState`` if present."""
+def _extract_segment_anchors_from_state(
+    state: Any, *, from_step: int = 0, exclude: set[str] | None = None
+) -> list[dict[str, Any]]:
+    """Read the per-step JSON artifacts written by the read-only SAM3 tool."""
     anchors: list[dict[str, Any]] = []
     seen_phrases: set[str] = set()
     for record in state.records():
-        result = record.result or {}
-        if not isinstance(result, dict):
+        if record.step_idx < from_step:
             continue
-        xyz = result.get("world_xyz")
-        prompt = str((record.command or {}).get("prompt") or "").strip()
-        if (
-            prompt
-            and prompt not in seen_phrases
-            and isinstance(xyz, list)
-            and len(xyz) >= 3
-            and all(isinstance(v, (int, float)) and math.isfinite(v) for v in xyz[:3])
-        ):
+        for name in sorted(record.artifacts):
+            if not (name.startswith("segment_") and name.endswith(".json")) or (
+                exclude and name in exclude
+            ):
+                continue
+            result = state.load(name, step=record.step_idx)
+            xyz = result.get("world_xyz")
+            prompt = str(result.get("prompt") or "").strip()
+            if (
+                result.get("found") is not True
+                or result.get("mode") != "text"
+                or not prompt
+                or prompt in seen_phrases
+                or not isinstance(xyz, list)
+                or len(xyz) < 3
+                or not all(
+                    isinstance(v, (int, float)) and math.isfinite(v) for v in xyz[:3]
+                )
+            ):
+                continue
             seen_phrases.add(prompt)
             anchors.append(
                 {
                     "phrase": prompt,
                     "locator": "segment",
-                    "camera": str((record.command or {}).get("camera") or "agentview"),
+                    "camera": str(result.get("camera") or "agentview"),
                     "score": result.get("score"),
                     "readings": [[float(xyz[0]), float(xyz[1]), float(xyz[2])]],
                     "median_xy": [float(xyz[0]), float(xyz[1])],
@@ -723,6 +784,18 @@ def _extract_segment_anchors_from_state(state: Any) -> list[dict[str, Any]]:
                 }
             )
     return anchors
+
+
+@contextlib.contextmanager
+def _record_evolution_errors(
+    trace: dict[str, Any], note: Callable[[str], None]
+) -> Iterator[None]:
+    """Keep the environment outcome when an optional memory update fails."""
+    try:
+        yield
+    except (OSError, ValueError) as exc:
+        trace["evolution_error"] = str(exc)
+        note(f"Flash memory update failed: {exc}")
 
 
 def run_flash_evolve(
@@ -741,10 +814,24 @@ def run_flash_evolve(
     started = time.time()
     plan_name = plan_name_for_cell(cell_tag)
     store_dir = Path(flash_memory_dir).expanduser().resolve()
-    store_dir.mkdir(parents=True, exist_ok=True)
     memory_root = Path(toolkit.memory.root).resolve()
-
-    has_plan = bootstrap_plan_from_corpus(memory_root, store_dir, cell_tag, note=note)
+    program = None
+    if evolve_enabled:
+        if bootstrap_plan_from_corpus(memory_root, store_dir, cell_tag, note=note):
+            program = load_evolving_plan(store_dir, plan_name)
+    elif all(
+        (store_dir / f"{plan_name}_{suffix}.json").is_file()
+        for suffix in ("plan", "anchors")
+    ):
+        program = load_evolving_plan(store_dir, plan_name)
+    else:
+        # A frozen evaluation can still use seed-0 assets without modifying
+        # its (possibly read-only) input store.
+        with tempfile.TemporaryDirectory() as staging:
+            if bootstrap_plan_from_corpus(
+                memory_root, Path(staging), cell_tag, note=note
+            ):
+                program = load_evolving_plan(Path(staging), plan_name)
     molmo = getattr(getattr(toolkit, "primitives", None), "molmo_client", None)
 
     trace_summary: dict[str, Any] = {
@@ -753,7 +840,7 @@ def run_flash_evolve(
         "flash_memory_dir": str(store_dir),
         "evolve_enabled": bool(evolve_enabled),
         "slow_planner": slow_planner_name,
-        "had_initial_plan": has_plan,
+        "had_initial_plan": program is not None,
         "execution_mode": "failed",
         "evolved_action": "none",
         "branch_attempts": [],
@@ -761,7 +848,7 @@ def run_flash_evolve(
         "slow_result": None,
     }
 
-    if not has_plan:
+    if program is None:
         note(f"no Flash plan for {plan_name}; running cold-start {slow_planner_name}")
         slow_result = slow_solve(user_message)
         solved = bool(toolkit.solved())
@@ -773,20 +860,21 @@ def run_flash_evolve(
             "slow_cold_start_solved" if solved else "slow_cold_start_failed"
         )
         if solved and evolve_enabled:
-            compiled = compile_new_plan_from_state(
-                state=toolkit.state,
-                cell_tag=cell_tag,
-                store_dir=store_dir,
-                slow_planner=slow_planner_name,
-                measured_anchors=_extract_segment_anchors_from_state(toolkit.state),
-            )
-            if compiled is not None:
-                trace_summary["evolved_action"] = "compiled_new_plan"
-                trace_summary["compiled_plan"] = compiled
-                note(
-                    f"compiled new Flash plan {plan_name} "
-                    f"({compiled['actions']} actions, {compiled['anchors']} anchors)"
+            with _record_evolution_errors(trace_summary, note):
+                compiled = compile_new_plan_from_state(
+                    state=toolkit.state,
+                    cell_tag=cell_tag,
+                    store_dir=store_dir,
+                    slow_planner=slow_planner_name,
+                    measured_anchors=_extract_segment_anchors_from_state(toolkit.state),
                 )
+                if compiled is not None:
+                    trace_summary["evolved_action"] = "compiled_new_plan"
+                    trace_summary["compiled_plan"] = compiled
+                    note(
+                        f"compiled new Flash plan {plan_name} "
+                        f"({compiled['actions']} actions, {compiled['anchors']} anchors)"
+                    )
         trace_summary["done"] = solved
         trace_summary["elapsed_s"] = round(time.time() - started, 2)
         _write_trace(output_dir, trace_summary)
@@ -798,7 +886,6 @@ def run_flash_evolve(
         }
 
     # Stage 1: Fast-path execution (with 0-token learned recovery branches).
-    program = load_evolving_plan(store_dir, plan_name)
     note(
         f"running System-1 Flash for {plan_name} "
         f"({len(program['plan'])} steps, "
@@ -821,23 +908,28 @@ def run_flash_evolve(
     # Persist empirical hit/miss stats for any recovery branches tried in Stage 1.
     if evolve_enabled:
         for attempt in trace_summary["branch_attempts"]:
-            record_branch_outcome(
-                store_dir,
-                plan_name,
-                str(attempt["branch_id"]),
-                succeeded=bool(attempt["succeeded"]),
-                cell_tag=cell_tag,
-            )
+            with _record_evolution_errors(trace_summary, note):
+                record_branch_outcome(
+                    store_dir,
+                    plan_name,
+                    str(attempt["branch_id"]),
+                    succeeded=bool(attempt["succeeded"]),
+                    cell_tag=cell_tag,
+                )
 
-    if replay_outcome.get("done"):
-        trace_summary["done"] = True
+    if replay_outcome.get("done") or replay_outcome.get("mode") == "flash_truncated":
+        trace_summary["done"] = bool(replay_outcome.get("done"))
         trace_summary["execution_mode"] = str(replay_outcome.get("mode", "flash_fast"))
-        if trace_summary["branch_attempts"] and evolve_enabled:
+        if (
+            trace_summary["branch_attempts"]
+            and evolve_enabled
+            and not trace_summary.get("evolution_error")
+        ):
             trace_summary["evolved_action"] = "updated_branch_stats"
         trace_summary["elapsed_s"] = round(time.time() - started, 2)
         _write_trace(output_dir, trace_summary)
         return {
-            "done": True,
+            "done": trace_summary["done"],
             "program": plan_name,
             "trace": trace_summary,
             "slow_planner_result": None,
@@ -855,6 +947,9 @@ def run_flash_evolve(
         f"({(replay_outcome.get('failure') or {}).get('failure_kind', 'unknown')}) "
         f"-> invoking {slow_planner_name}"
     )
+    preexisting_artifacts = (
+        toolkit.state.get(handover_step).artifacts if evolve_enabled else set()
+    )
     slow_result = slow_solve(handover_msg)
     solved = bool(toolkit.solved())
     trace_summary["slow_result"] = {
@@ -868,30 +963,34 @@ def run_flash_evolve(
 
     # Stage 3: Compile slow-planner rescue into a procedural recovery branch.
     if solved and evolve_enabled and replay_outcome.get("failure"):
-        anchors_doc = json.loads(
-            (store_dir / f"{plan_name}_anchors.json").read_text("utf-8")
-        )
-        merged_live = dict(replay_outcome.get("live_anchors") or {})
-        for seg_anchor in _extract_segment_anchors_from_state(toolkit.state):
-            merged_live.setdefault(seg_anchor["phrase"], seg_anchor["median_xy"])
-        branch = compile_recovery_branch(
-            state=toolkit.state,
-            handover_step=handover_step,
-            failure=replay_outcome["failure"],
-            live_anchors=merged_live,
-            cell_tag=cell_tag,
-            slow_planner=slow_planner_name,
-            existing_anchors=anchors_doc.get("anchors") or (),
-        )
-        if branch is not None:
-            _, branch_id = patch_plan_with_branch(store_dir, plan_name, branch)
-            trace_summary["evolved_action"] = "patched_branch"
-            trace_summary["patched_branch_id"] = branch_id
-            trace_summary["patched_branch_actions"] = len(branch["actions"])
-            note(
-                f"patched {plan_name} with recovery branch {branch_id} "
-                f"({len(branch['actions'])} anchored actions)"
-            )
+        # A tried branch may already have moved or grasped the object. Its
+        # rescue suffix cannot run directly from the main plan's trigger.
+        if replay_outcome.get("failure_step", handover_step) != handover_step:
+            trace_summary["evolution_skipped"] = "branch_changed_state_before_handover"
+        else:
+            with _record_evolution_errors(trace_summary, note):
+                branch = compile_recovery_branch(
+                    state=toolkit.state,
+                    handover_step=handover_step,
+                    failure=replay_outcome["failure"],
+                    live_anchors=replay_outcome.get("live_anchors") or {},
+                    cell_tag=cell_tag,
+                    slow_planner=slow_planner_name,
+                    measured_anchors=_extract_segment_anchors_from_state(
+                        toolkit.state,
+                        from_step=handover_step,
+                        exclude=preexisting_artifacts,
+                    ),
+                )
+                if branch is not None:
+                    _, branch_id = patch_plan_with_branch(store_dir, plan_name, branch)
+                    trace_summary["evolved_action"] = "patched_branch"
+                    trace_summary["patched_branch_id"] = branch_id
+                    trace_summary["patched_branch_actions"] = len(branch["actions"])
+                    note(
+                        f"patched {plan_name} with recovery branch {branch_id} "
+                        f"({len(branch['actions'])} actions)"
+                    )
 
     trace_summary["elapsed_s"] = round(time.time() - started, 2)
     _write_trace(output_dir, trace_summary)
