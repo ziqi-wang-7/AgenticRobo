@@ -35,7 +35,7 @@ from robots.libero.flash.evolve import (
 )
 from rpent.planner.base import Planner, PlannerResult
 from rpent.planner.flash_evolve import FlashEvolvePlanner
-from rpent.session import EnvState
+from rpent.session import EnvState, StepRecord
 from rpent.tools import ToolResult
 
 
@@ -516,6 +516,7 @@ def test_cold_start_compiles_new_plan_for_subsequent_seeds(
     tk1 = FakeLiberoToolkit(
         tmp_path / "cold1",
         memory_root=empty_corpus,
+        fail_first_pick_prompt="pick the wrong object",
         anchors_xyz={
             "the yellow and white mug": [0.12, -0.04, 0.50],
             "the plate": [-0.06, 0.14, 0.50],
@@ -535,6 +536,7 @@ def test_cold_start_compiles_new_plan_for_subsequent_seeds(
                     "world_xyz": [0.12, -0.04, 0.5],
                 },
             )
+        tk1.execute_tool("pi0_pick", {"prompt": "pick the wrong object"})
         tk1.execute_tool("move_to", {"xyz": [0.12, -0.04, 0.70], "gripper": -1})
         tk1.execute_tool("pi0_pick", {"prompt": "pick up the yellow and white mug"})
         tk1.execute_tool("set_gripper", {"gripper": 1})
@@ -560,6 +562,11 @@ def test_cold_start_compiles_new_plan_for_subsequent_seeds(
     assert out1["done"] is True
     assert out1["trace"]["execution_mode"] == "slow_cold_start_solved"
     assert out1["trace"]["evolved_action"] == "compiled_new_plan"
+    saved_trace = json.loads(
+        (tmp_path / "cold1" / "flash_evolve_trace.json").read_text("utf-8")
+    )
+    assert saved_trace["null_events_folded"] == 1
+    assert saved_trace["compiled_plan"]["null_events_folded"] == 1
     assert (store_dir / "goal_task_t3_plan.json").is_file()
     assert (store_dir / "goal_task_t3_anchors.json").is_file()
 
@@ -968,7 +975,7 @@ def test_prepare_stream_uses_backend_model_and_unique_episode_ids(
     assert "initial_scene" in first and "initial_scene" not in second
 
 
-def test_fold_null_events_removes_retries_stalls_and_fidgets_safely() -> None:
+def test_fold_null_events_keeps_waypoints_and_removes_verified_redundancy() -> None:
     def rec(
         idx: int,
         cmd: dict[str, Any],
@@ -993,7 +1000,11 @@ def test_fold_null_events_removes_retries_stalls_and_fidgets_safely() -> None:
         rec(3, {"action": "move_to", "xyz": [0.12, 0.08, 0.70], "gripper": -1}),
         rec(4, {"action": "move_to", "xyz": [0.25, 0.25, 0.70], "gripper": -1}),
         rec(5, {"action": "move_to", "xyz": [0.125, 0.085, 0.70], "gripper": -1}),
-        rec(6, {"action": "move_to", "xyz": [0.128, 0.088, 0.70], "gripper": -1}),
+        rec(
+            6,
+            {"action": "move_to", "xyz": [0.128, 0.088, 0.70], "gripper": -1},
+            {"steps_used": 1, "final_dist_m": 0.0042},
+        ),
         rec(
             7,
             {"action": "pi0_pick", "prompt": "grasp the bowl rim"},
@@ -1011,7 +1022,11 @@ def test_fold_null_events_removes_retries_stalls_and_fidgets_safely() -> None:
             },
             {"final_dist_m": 0.07, "steps_used": 80},
         ),
-        rec(10, {"action": "move_pose", "xyz": [-0.10, 0.30, 0.70], "gripper": 1}),
+        rec(
+            10,
+            {"action": "move_pose", "xyz": [-0.10, 0.30, 0.70], "gripper": 1},
+            {"steps_used": 6, "final_dist_m": 0.004},
+        ),
         rec(11, {"action": "move_pose", "xyz": [-0.10, 0.30, 0.50], "gripper": 1}),
         rec(12, {"action": "release"}, {"ok": True}, terminated=True),
         # Anything after termination must be ignored
@@ -1019,9 +1034,12 @@ def test_fold_null_events_removes_retries_stalls_and_fidgets_safely() -> None:
     ]
 
     kept, steps, folded = fold_null_events(records)
-    assert folded == 6
-    assert steps == [6, 7, 8, 10, 11, 12]
+    assert folded == 3
+    assert steps == [1, 3, 4, 5, 7, 8, 10, 11, 12]
     assert [c["action"] for c in kept] == [
+        "move_to",
+        "move_to",
+        "move_to",
         "move_to",
         "pi0_pick",
         "set_gripper",
@@ -1029,7 +1047,51 @@ def test_fold_null_events_removes_retries_stalls_and_fidgets_safely() -> None:
         "move_pose",
         "release",
     ]
-    assert kept[0]["xyz"] == [0.128, 0.088, 0.70]
+    assert kept[3]["xyz"] == [0.125, 0.085, 0.70]
+
+
+@pytest.mark.parametrize(
+    ("retry_result", "kept"),
+    [
+        ({"final_dist_m": 0.002}, [1, 4]),
+        ({"error": "cancelled"}, [1, 2]),
+        ({"final_dist_m": 0.04}, [1, 2, 4]),
+    ],
+)
+def test_failed_grasp_keeps_rotation_and_requires_a_completed_replacement(
+    retry_result, kept
+):
+    target = {"action": "move_to", "xyz": [0.1, 0.0, 0.6]}
+    trajectory = [
+        StepRecord(1, {}, command={"action": "rotate_wrist", "delta_yaw": 0.4}),
+        StepRecord(2, {}, command=target),
+        StepRecord(
+            3,
+            {},
+            command={"action": "pi0_pick", "prompt": "pick the bowl"},
+            result={"success": False},
+        ),
+        StepRecord(4, {}, command=target, result=retry_result),
+    ]
+    assert fold_null_events(trajectory)[1] == kept
+
+
+@pytest.mark.parametrize("boundary", ["terminated", "truncated"])
+def test_stalled_approach_before_contact_and_episode_boundary(boundary):
+    trajectory = [
+        StepRecord(
+            1,
+            {},
+            command={"action": "move_to", "xyz": [0.1, 0.0, 0.6]},
+            result={"final_dist_m": 0.04, "steps_used": 80},
+        ),
+        StepRecord(
+            2, {}, command={"action": "pi0_doubled", "prompt": "press the button"}
+        ),
+        StepRecord(3, {}, **{boundary: True}),
+        StepRecord(4, {}, command={"action": "release"}),
+    ]
+    assert fold_null_events(trajectory)[1] == [1, 2]
 
 
 def test_fold_null_events_preserves_contact_skill_pi0_pick() -> None:
@@ -1058,3 +1120,80 @@ def test_fold_null_events_preserves_contact_skill_pi0_pick() -> None:
     assert folded == 0
     assert steps == [1, 2]
     assert kept[0]["action"] == "pi0_pick"
+
+
+@pytest.mark.parametrize(
+    ("action", "change", "second_steps", "max_steps", "expected"),
+    [
+        ("move_pose", {"target_pitch": 0.4}, 1, 80, [1, 2]),
+        ("move_to", {"target_yaw": 0.3}, 1, 80, [1, 2]),
+        ("move_to", {"step_clip": 0.01}, 1, 80, [1, 2]),
+        ("move_to", {"gripper": -0.25}, 1, 80, [1, 2]),
+        ("move_to", {"xyz": [0.004, 0.0, 0.7]}, 3, 80, [1, 2]),
+        ("move_to", {"xyz": [0.013, 0.0, 0.7]}, 1, 80, [1, 2]),
+        ("move_pose", {}, 1, 1, [1, 2]),
+        ("move_pose", {}, 1, 80, [1]),
+        ("move_to", {"xyz": [0.004, 0.0, 0.7]}, 1, 80, [1]),
+    ],
+)
+def test_fold_only_redundant_servo_checks(
+    action, change, second_steps, max_steps, expected
+) -> None:
+    cmd = {"action": action, "xyz": [0.0, 0.0, 0.7], "max_steps": max_steps}
+    records = [
+        SimpleNamespace(
+            step_idx=idx,
+            command=command,
+            result={"steps_used": count},
+            terminated=False,
+            truncated=False,
+        )
+        for idx, command, count in [
+            (1, cmd, min(6, max_steps)),
+            (2, {**cmd, **change}, second_steps),
+        ]
+    ]
+    commands, steps, folded = fold_null_events(records)
+    assert steps == expected
+    assert commands == [records[i - 1].command for i in expected]
+    assert folded == len(records) - len(expected)
+
+
+def test_fold_preserves_open_gripper_detour_and_terminal_return() -> None:
+    # An open gripper can push a fixture or take a deliberate clearance path.
+    # The terminal return actually moved the gripper, even in a single servo step.
+    records = [
+        SimpleNamespace(
+            step_idx=i,
+            command={"action": "move_to", "xyz": [x, 0.0, 0.7], "gripper": -1},
+            result={"steps_used": steps_used},
+            terminated=terminal,
+            truncated=False,
+        )
+        for i, x, steps_used, terminal in [
+            (1, 0.0, 5, False),
+            (2, 0.2, 5, False),
+            (3, 0.0, 1, True),
+        ]
+    ]
+    _, steps, folded = fold_null_events(records)
+    assert steps == [1, 2, 3]
+    assert folded == 0
+
+
+@pytest.mark.parametrize("flag", ["terminated", "truncated"])
+def test_fold_keeps_terminal_servo_call_at_the_same_target(flag: str) -> None:
+    cmd = {"action": "move_pose", "xyz": [0.0, 0.0, 0.7]}
+    records = [
+        SimpleNamespace(
+            step_idx=i,
+            command=cmd,
+            result={"steps_used": 1},
+            terminated=i == 2 and flag == "terminated",
+            truncated=i == 2 and flag == "truncated",
+        )
+        for i in (1, 2)
+    ]
+    _, steps, folded = fold_null_events(records)
+    assert steps == [1, 2]
+    assert folded == 0

@@ -37,6 +37,7 @@ from typing import Any
 import numpy as np
 
 from robots.libero import tools as libero_tools
+from robots.libero.flash.generate import _is_contact_pick
 from robots.libero.flash.prompts import build as prompt_for
 from robots.libero.memory import replay_directory
 from robots.libero.recovery_evidence import motion_alert
@@ -625,7 +626,12 @@ def _run_anchored_sequence(
         }
 
     def perform(
-        idx: int, name: str, args: dict[str, Any], anchor: str | None
+        idx: int,
+        name: str,
+        args: dict[str, Any],
+        anchor: str | None,
+        *,
+        check_grasp: bool = False,
     ) -> dict[str, Any]:
         entry = {"plan_idx": idx, "action": name, "status": "ok"}
         trace.append(entry)
@@ -649,7 +655,7 @@ def _run_anchored_sequence(
                 "motion_stalled",
                 f"{name} stalled with servo residual exceeding tolerance",
             )
-        elif name == "pi0_pick" and not pick_succeeded(raw):
+        elif check_grasp and not pick_succeeded(raw):
             entry["status"] = "pick_failed"
         return raw
 
@@ -660,6 +666,7 @@ def _run_anchored_sequence(
         if name in {"segment", "segment_point"}:
             continue
         args = dict(entry.get("arguments") or {})
+        check_grasp = name == "pi0_pick" and not _is_contact_pick(args)
         phrase = entry.get("anchor")
         last_anchor = phrase or last_anchor
 
@@ -708,13 +715,13 @@ def _run_anchored_sequence(
             held_phrase = re.split(r"\b(on|in|into|inside|by|and)\b", stripped)[
                 0
             ].strip()
-            if name == "pi0_pick" and not recorded_commands:
+            if check_grasp and not recorded_commands:
                 args.update(FLASH_PICK_THRESHOLDS)
 
-        raw = perform(idx, name, args, last_anchor)
+        raw = perform(idx, name, args, last_anchor, check_grasp=check_grasp)
         if failure or _episode_ended(toolkit):
             break
-        if name == "pi0_pick" and not pick_succeeded(raw):
+        if check_grasp and not pick_succeeded(raw):
             attempts = 1
             while not recorded_commands and attempts < PICK_ATTEMPTS:
                 for again in recent:
@@ -723,7 +730,7 @@ def _run_anchored_sequence(
                         break
                 if failure or _episode_ended(toolkit):
                     break
-                raw = perform(idx, name, args, last_anchor)
+                raw = perform(idx, name, args, last_anchor, check_grasp=True)
                 attempts += 1
                 if failure or _episode_ended(toolkit) or pick_succeeded(raw):
                     break

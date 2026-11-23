@@ -16,17 +16,22 @@
 
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from robots.libero.flash.evolve import (
     bootstrap_plan_from_corpus,
     compile_new_plan_from_state,
+    compile_recovery_branch,
     load_evolving_plan,
     match_recovery_branch,
     patch_plan_with_branch,
     run_flash_evolve,
 )
+from robots.libero.flash.replay import replay_with_evolution
+from robots.libero.tools import LiberoPrimitives
+from rpent.tools import ToolResult
 from tests.unit_tests.robots.libero.test_flash_evolve import (
     FakeLiberoToolkit,
     _write_seed0_task_specific,
@@ -114,6 +119,99 @@ def test_rescue_measured_anchor_is_relocalized_before_branch(tmp_path: Path) -> 
         result["trace"]["evolution_skipped"] == "branch_changed_state_before_handover"
     )
     assert len(load_evolving_plan(store, tag)["recovery_branches"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("route", "contact_args"),
+    [
+        ("cold_start", {"prompt": "press the knob", "lift_thresh": 999.0}),
+        ("branch", {"prompt": "turn on the stove"}),
+    ],
+)
+def test_learned_contact_pick_continues_without_a_grasp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, route: str, contact_args: dict
+) -> None:
+    contact_args = {**contact_args, "max_chunks": 2}
+
+    def episode(path: Path) -> FakeLiberoToolkit:
+        tk = FakeLiberoToolkit(
+            path,
+            memory_root=tmp_path,
+            anchors_xyz={
+                "the black bowl": [-0.25, -0.25, 0.5],
+                "the plate": [0.1, -0.1, 0.5],
+            },
+        )
+        ordinary_tool = tk.execute_tool
+        # The real contact action consumes policy chunks without lifting an object.
+        static_arm = SimpleNamespace(
+            _last_obs_eef_z=0.70,
+            _last_obs_gripper=0.08,
+            _vlm_chunk=lambda _: None,
+            env=SimpleNamespace(terminated=False, truncated=False),
+        )
+
+        def execute(name: str, args: dict) -> ToolResult:
+            if name != "pi0_pick" or args["prompt"] != contact_args["prompt"]:
+                return ordinary_tool(name, args)
+            assert args == contact_args
+            result = LiberoPrimitives.pi0_pick(static_arm, **args).data
+            assert result["success"] is False and result["chunks_used"] == 2
+            tk.executed.append((name, dict(args)))
+            command = {"action": name, **args}
+            with tk.state.record_step(
+                state=tk.state.get().state, command=command, result=result
+            ):
+                pass
+            return ToolResult(data={"log": {"command": command, "result": result}})
+
+        monkeypatch.setattr(tk, "execute_tool", execute)
+        return tk
+
+    taught = episode(tmp_path / "teach")
+    taught.execute_tool("move_to", {"xyz": [0.25, 0.25, 0.7]})
+    taught.execute_tool("pi0_pick", contact_args)
+    taught.execute_tool("move_to", {"xyz": [-0.25, -0.25, 0.7]})
+    taught.execute_tool("pi0_pick", {"prompt": "grasp the bowl"})
+    taught.execute_tool("move_to", {"xyz": [0.1, -0.1, 0.7], "gripper": 1})
+    taught.execute_tool("release", {})
+    assert taught.solved()
+    tag = "spatial_task_t0_s1"
+    if route == "cold_start":
+        compile_new_plan_from_state(
+            state=taught.state, cell_tag=tag, store_dir=tmp_path, slow_planner="codex"
+        )
+        program = load_evolving_plan(tmp_path, "spatial_task_t0")
+        assert program["reference"]["the black bowl"] == pytest.approx([-0.25, -0.25])
+    else:
+        failure = {"failure_kind": "plan_incomplete", "failed_step_idx": 0}
+        branch = compile_recovery_branch(
+            state=taught.state,
+            handover_step=0,
+            failure=failure,
+            live_anchors={},
+            cell_tag=tag,
+            slow_planner="codex",
+        )
+        assert branch is not None
+        program = {
+            "plan": [],
+            "reference": {},
+            "locator_of": {},
+            "recovery_branches": [branch],
+        }
+
+    tk = episode(tmp_path / "replay")
+    result = replay_with_evolution(
+        tk, None, program, branch_matcher=match_recovery_branch
+    )
+    assert result["mode"] == ("flash_fast" if route == "cold_start" else "flash_branch")
+    assert result["done"] is True
+    assert [item["status"] for item in result["executed_trace"]] == ["ok"] * 6
+    assert [args["prompt"] for name, args in tk.executed if name == "pi0_pick"] == [
+        contact_args["prompt"],
+        "grasp the bowl",
+    ]
 
 
 def test_frozen_evaluation_does_not_create_store(tmp_path: Path) -> None:

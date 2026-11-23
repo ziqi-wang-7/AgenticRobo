@@ -46,13 +46,14 @@ from robots.libero.flash.generate import (
     MOVE_ACTIONS,
     _attach_moves,
     _fallback_anchors,
-    _is_articulation,
+    _is_contact_pick,
     _merge_anchors,
     extract_relations,
     generate_flash_plan,
 )
 from robots.libero.flash.replay import _CELL, load, replay_with_evolution
 from robots.libero.recovery_evidence import motion_alert
+from rpent.session import StepRecord
 
 try:
     import fcntl
@@ -350,27 +351,7 @@ def match_recovery_branch(
     return scored[0][1]
 
 
-_POSITIONING_ACTIONS = frozenset(
-    {"move_to", "move_pose", "rotate_wrist", "rotate_pitch"}
-)
 _JITTER_TOL_M = 0.015
-_LOOP_RETURN_TOL_M = 0.02
-
-
-def _is_contact_pick(cmd: Mapping[str, Any]) -> bool:
-    """Return True for repurposed contact-skill pi0_pick calls (e.g. stove knob)."""
-    if _is_articulation(dict(cmd)):
-        return True
-    lift = cmd.get("lift_thresh")
-    return isinstance(lift, (int, float)) and float(lift) >= 1.0
-
-
-def _cmd_gripper(cmd: Mapping[str, Any]) -> int:
-    val = cmd.get("gripper", -1)
-    try:
-        return 1 if float(val) > 0 else -1
-    except (TypeError, ValueError):
-        return -1
 
 
 def _cmd_xyz(cmd: Mapping[str, Any]) -> tuple[float, float, float] | None:
@@ -384,136 +365,128 @@ def _cmd_xyz(cmd: Mapping[str, Any]) -> tuple[float, float, float] | None:
     return None
 
 
-def fold_null_events(
-    records: Sequence[Any],
-) -> tuple[list[dict[str, Any]], list[int], int]:
-    """Filter out zero-progress trial-and-error null events before compilation.
+def _redundant_servo_check(previous: Mapping[str, Any], record: StepRecord) -> bool:
+    """Whether a repeated waypoint returned before its first simulator step."""
+    cmd = record.command
+    if cmd["action"] not in MOVE_ACTIONS or record.terminated or record.truncated:
+        return False
+    # Both servo tools count the initial convergence check in steps_used. With
+    # a one-iteration budget or a terminal flag, one check can include motion.
+    if not isinstance(record.result, dict) or record.result.get("steps_used") != 1:
+        return False
+    if "max_steps" in cmd and (
+        not isinstance(cmd["max_steps"], int) or cmd["max_steps"] <= 1
+    ):
+        return False
 
-    Preserves ``7c3950a`` termination boundaries and interrupted/error guards,
-    while also:
-    1. Preserving repurposed contact-skill ``pi0_pick`` calls (e.g. stove knob
-       with ``lift_thresh >= 1.0`` or articulation verbs).
-    2. Folding orphaned empty-gripper approach moves preceding a failed
-       non-contact ``pi0_pick`` when a subsequent attempt provides fresh setup.
-    3. Folding stalled ``motion_alert`` moves (as before), consecutive
-       micro-jitter moves (< 1.5 cm), and empty-gripper A -> B -> A detours.
+    xyz, prior_xyz = _cmd_xyz(cmd), _cmd_xyz(previous)
+    if xyz is None or prior_xyz is None:
+        return False
+    tol = cmd.get("tol", 0.012)
+    if not isinstance(tol, (int, float)) or not math.isfinite(tol):
+        return False
+    return math.dist(xyz, prior_xyz) < min(tol, _JITTER_TOL_M) and {
+        k: v for k, v in cmd.items() if k != "xyz"
+    } == {k: v for k, v in previous.items() if k != "xyz"}
+
+
+def _reached_same_target(
+    original: Mapping[str, Any], next_record: StepRecord | None
+) -> bool:
+    """Check for a successful Cartesian replacement with the same gripper and pose constraints."""
+    if next_record is None or original["action"] not in MOVE_ACTIONS:
+        return False
+    retry = next_record.command
+    result = next_record.result
+    if (
+        retry["action"] not in MOVE_ACTIONS
+        or not isinstance(result, dict)
+        or result.get("error")
+        or result.get("interrupted")
+    ):
+        return False
+    target = _cmd_xyz(original)
+    if target is None or target != _cmd_xyz(retry):
+        return False
+    if original.get("gripper", -1) != retry.get("gripper", -1):
+        return False
+    # A rotation may still be in progress when the translation reaches its target.
+    # Leave orientation-controlled waypoints to the demonstrated sequence.
+    if any(
+        cmd.get(axis) is not None
+        for cmd in (original, retry)
+        for axis in ("target_pitch", "target_yaw")
+    ):
+        return False
+    residual = result.get("final_dist_m")
+    return isinstance(residual, (int, float)) and 0 <= residual < min(
+        original.get("tol", 0.012), retry.get("tol", 0.012)
+    )
+
+
+def fold_null_events(
+    records: Sequence[StepRecord],
+) -> tuple[list[dict[str, Any]], list[int], int]:
+    """Remove failed ordinary grasps and redundant motions before compilation.
+
+    A failed grasp can have useful approach waypoints. Remove its last
+    open-gripper approach only when the next primitive reaches that same
+    target. Preserve contact skills and motions that changed the scene.
 
     Returns:
         ``(kept_commands, kept_step_indices, folded_count)``.
     """
-    raw: list[Any] = []
+    raw: list[StepRecord] = []
     for rec in records:
         cmd = rec.command
-        if not isinstance(cmd, dict) or cmd.get("action") not in PRIMITIVE_ACTIONS:
-            continue
-        raw.append(rec)
-        if rec.terminated:
+        if isinstance(cmd, dict) and cmd.get("action") in PRIMITIVE_ACTIONS:
+            raw.append(rec)
+        if rec.terminated or rec.truncated:
             break
-    if not raw:
-        return [], [], 0
 
-    # Pass 1: drop errors, interrupted calls, non-terminating motion stalls, and
-    # failed non-contact pi0_pick cycles (plus their orphaned empty approach).
-    keep_mask = [True] * len(raw)
+    stage1: list[StepRecord] = []
     for idx, rec in enumerate(raw):
         cmd = rec.command
-        action = cmd.get("action")
         res = rec.result if isinstance(rec.result, dict) else {}
         if res.get("error") or res.get("interrupted"):
-            keep_mask[idx] = False
             continue
-        if not rec.terminated and motion_alert(rec):
-            keep_mask[idx] = False
+        following = raw[idx + 1] if idx + 1 < len(raw) else None
+        if following is not None and following.step_idx != rec.step_idx + 1:
+            following = None
+        if motion_alert(rec) and _reached_same_target(cmd, following):
             continue
         if (
-            action == "pi0_pick"
+            cmd["action"] == "pi0_pick"
             and not _is_contact_pick(cmd)
-            and not rec.terminated
+            and not (rec.terminated or rec.truncated)
             and res.get("success") is False
         ):
-            keep_mask[idx] = False
-            has_fresh_setup = False
-            for nxt in raw[idx + 1 :]:
-                nxt_act = nxt.command.get("action")
-                if nxt_act in MOVE_ACTIONS and _cmd_gripper(nxt.command) == -1:
-                    has_fresh_setup = True
-                    break
-                if nxt_act in {"pi0_pick", "pi0_doubled", "set_gripper", "release"}:
-                    break
-            if has_fresh_setup:
-                back = idx - 1
-                while back >= 0 and keep_mask[back]:
-                    b_cmd = raw[back].command
-                    b_act = b_cmd.get("action")
-                    if b_act in _POSITIONING_ACTIONS and _cmd_gripper(b_cmd) == -1:
-                        keep_mask[back] = False
-                        back -= 1
-                    else:
-                        break
+            if (
+                stage1
+                and stage1[-1].step_idx == rec.step_idx - 1
+                and stage1[-1].command.get("gripper", -1) == -1
+                and _reached_same_target(stage1[-1].command, following)
+            ):
+                stage1.pop()
+            continue
+        stage1.append(rec)
 
-    stage1 = [rec for rec, keep in zip(raw, keep_mask) if keep]
-
-    # Pass 2: fold consecutive micro-jitter moves and empty-gripper A->B->A loops.
-    stage2: list[Any] = []
+    # Only discard a later check. The first waypoint and any intervening
+    # physical actions are part of the demonstrated path.
+    stage2: list[StepRecord] = []
+    previous_step = None
     for rec in stage1:
-        cmd = rec.command
-        act = cmd.get("action")
-        xyz = _cmd_xyz(cmd)
-        if stage2 and act in MOVE_ACTIONS and xyz is not None:
-            prev_cmd = stage2[-1].command
-            prev_xyz = _cmd_xyz(prev_cmd)
-            if (
-                prev_cmd.get("action") == act
-                and _cmd_gripper(prev_cmd) == _cmd_gripper(cmd)
-                and prev_xyz is not None
-                and math.dist(prev_xyz, xyz) < _JITTER_TOL_M
-            ):
-                stage2[-1] = rec
-                continue
-        if (
-            len(stage2) >= 2
-            and act in MOVE_ACTIONS
-            and _cmd_gripper(cmd) == -1
-            and xyz is not None
+        consecutive = previous_step == rec.step_idx - 1
+        previous_step = rec.step_idx
+        if not (
+            consecutive and stage2 and _redundant_servo_check(stage2[-1].command, rec)
         ):
-            prev1 = stage2[-1].command
-            prev0 = stage2[-2].command
-            xyz0 = _cmd_xyz(prev0)
-            if (
-                prev1.get("action") in MOVE_ACTIONS
-                and prev0.get("action") in MOVE_ACTIONS
-                and _cmd_gripper(prev1) == -1
-                and _cmd_gripper(prev0) == -1
-                and xyz0 is not None
-                and math.dist(xyz0, xyz) < _LOOP_RETURN_TOL_M
-            ):
-                stage2.pop()
-                continue
-        stage2.append(rec)
+            stage2.append(rec)
 
     commands = [dict(rec.command) for rec in stage2]
     steps = [int(rec.step_idx) for rec in stage2]
     folded = len(raw) - len(stage2)
     return commands, steps, folded
-
-
-def _extract_primitive_commands(
-    state: Any, *, after_step: int = -1, fold_nulls: bool = True
-) -> tuple[list[dict[str, Any]], list[int], int]:
-    """Extract executed primitive commands from ``EnvState`` after ``after_step``."""
-    sliced = [rec for rec in state.records() if rec.step_idx > after_step]
-    if fold_nulls:
-        return fold_null_events(sliced)
-    commands: list[dict[str, Any]] = []
-    steps: list[int] = []
-    for record in sliced:
-        cmd = record.command
-        if isinstance(cmd, dict) and cmd.get("action") in PRIMITIVE_ACTIONS:
-            commands.append(dict(cmd))
-            steps.append(int(record.step_idx))
-            if record.terminated:
-                break
-    return commands, steps, 0
 
 
 def _live_anchors_as_list(
@@ -558,8 +531,8 @@ def compile_recovery_branch(
     measured_anchors: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any] | None:
     """Compile post-handover slow-planner recovery steps into a Flash branch."""
-    raw_commands, step_indices, folded_nulls = _extract_primitive_commands(
-        state, after_step=handover_step, fold_nulls=True
+    raw_commands, step_indices, folded_nulls = fold_null_events(
+        [rec for rec in state.records() if rec.step_idx > handover_step]
     )
     if not raw_commands:
         return None
@@ -736,12 +709,10 @@ def compile_new_plan_from_state(
     """Compile a full solved slow-planner episode into a new Flash plan (cold start)."""
     family, suite, task, _ = _parse_cell_tag(cell_tag)
     plan_name = f"{family}_{suite}_t{task}"
-    raw_commands, _, folded_nulls = _extract_primitive_commands(
-        state, after_step=-1, fold_nulls=True
-    )
+    records = state.records()
+    raw_commands, _, folded_nulls = fold_null_events(records)
     if not raw_commands:
         return None
-    records = state.records()
     language = ""
     for rec in records:
         lang = (rec.extras or {}).get("task_language")
@@ -1012,6 +983,7 @@ def run_flash_evolve(
                 if compiled is not None:
                     trace_summary["evolved_action"] = "compiled_new_plan"
                     trace_summary["compiled_plan"] = compiled
+                    trace_summary["null_events_folded"] = compiled["null_events_folded"]
                     note(
                         f"compiled new Flash plan {plan_name} "
                         f"({compiled['actions']} actions, {compiled['anchors']} anchors)"

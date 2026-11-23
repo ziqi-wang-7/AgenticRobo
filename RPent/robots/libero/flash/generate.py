@@ -20,6 +20,7 @@ import argparse
 import json
 import math
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -166,11 +167,17 @@ def _move_xy(entry: dict[str, Any]) -> list[float] | None:
     return None
 
 
-def _is_articulation(entry: dict[str, Any]) -> bool:
-    if entry.get("action") == "pi0_doubled":
-        return True
-    return entry.get("action") == "pi0_pick" and bool(
-        ARTICULATION_VERBS.match(str(entry.get("prompt") or ""))
+def _is_contact_pick(arguments: Mapping[str, Any]) -> bool:
+    """Whether a pi0_pick command was taught as a contact skill."""
+    lift = arguments.get("lift_thresh")
+    return bool(ARTICULATION_VERBS.match(str(arguments.get("prompt") or ""))) or (
+        isinstance(lift, (int, float)) and lift >= 1.0
+    )
+
+
+def _is_articulation(entry: Mapping[str, Any]) -> bool:
+    return entry.get("action") == "pi0_doubled" or (
+        entry.get("action") == "pi0_pick" and _is_contact_pick(entry)
     )
 
 
@@ -195,8 +202,7 @@ def _fallback_anchors(
     """Recover semantic reference points when no segment reading was saved.
 
     Pick/release pairs are consumed in order, matching Long's ordered goal
-    transactions.  A ``pi0_pick`` whose prompt starts with an articulation verb is
-    deliberately not consumed as an object grasp.
+    transactions. Contact skills only supply articulation waypoints.
     """
     moves = [(index, _move_xy(entry)) for index, entry in enumerate(plan)]
     moves = [(index, xy) for index, xy in moves if xy is not None]
