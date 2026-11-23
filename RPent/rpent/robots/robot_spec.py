@@ -90,3 +90,6 @@ class RobotSpec:
     #: Takes the toolkit, the cell tag, and a note sink; returns at least
     #: ``{"done": bool}``. Left unset by robots without Flash Mode.
     run_flash: Callable[[Any, str, Callable[[str], None]], dict[str, Any]] | None = None
+    #: Run System-1 Flash replay with in-place slow-planner handover and
+    #: procedural memory evolution. Left unset by robots without Flash-Evolve.
+    run_flash_evolve: Callable[..., dict[str, Any]] | None = None

@@ -20,6 +20,7 @@ now and moves every waypoint with them, so the plan follows objects that moved
 without a planner in the loop.
 """
 
+from robots.libero.flash.evolve import run_flash_evolve
 from robots.libero.flash.replay import run_flash
 
-__all__ = ["run_flash"]
+__all__ = ["run_flash", "run_flash_evolve"]

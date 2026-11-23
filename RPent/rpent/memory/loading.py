@@ -28,7 +28,11 @@ from rpent.utils.config import get_memory_dir
 def prepare_run_memory(args: Namespace, spec: RobotSpec, config: RunConfig) -> None:
     """Set the single root used by prompts, tools and replay for this task."""
     # Pin the same resolved Codex environment model for selection and planner.
-    args.model = resolve_model(args.planner, args.model)
+    args.model = resolve_model(
+        args.planner,
+        args.model,
+        flash_slow_planner=getattr(args, "flash_slow_planner", "codex"),
+    )
     if spec.prepare_memory is not None:
         spec.prepare_memory(args, config)
         return

@@ -96,7 +96,10 @@ def prepare_memory(args: argparse.Namespace, config: RunConfig) -> None:
     if profile == "local":
         return
     version = select_version(
-        getattr(args, "memory_version", "auto"), model=args.model, planner=args.planner
+        getattr(args, "memory_version", "auto"),
+        model=args.model,
+        planner=args.planner,
+        flash_slow_planner=getattr(args, "flash_slow_planner", "codex"),
     )
     repo, revision = (
         parse_repo(args.memory_repo) if args.memory_repo else (None, "main")
@@ -114,7 +117,11 @@ def prepare_memory(args: argparse.Namespace, config: RunConfig) -> None:
 
 
 def select_version(
-    version: str = "auto", *, model: str | None = None, planner: str = "api"
+    version: str = "auto",
+    *,
+    model: str | None = None,
+    planner: str = "api",
+    flash_slow_planner: str = "codex",
 ) -> str:
     """Select a corpus without changing the running model or reasoning effort."""
     if version not in MEMORY_VERSIONS:
@@ -123,7 +130,7 @@ def select_version(
         return version
     if planner == "flash":
         return GPT5
-    resolved = resolve_model(planner, model)
+    resolved = resolve_model(planner, model, flash_slow_planner=flash_slow_planner)
     name = resolved.rsplit(":", 1)[-1].lower() if resolved else ""
     selected = {"gpt-5.5": GPT5, "gpt-6-astra": ASTRA}.get(name)
     if selected:

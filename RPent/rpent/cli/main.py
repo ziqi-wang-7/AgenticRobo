@@ -130,10 +130,31 @@ def _build_argparser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--planner",
         default="api",
-        choices=["api", "claude_code", "codex", "flash"],
+        choices=["api", "claude_code", "codex", "flash", "flash_evolve"],
         help="Planner backend: api | claude_code | codex are LLMs in the "
         "loop; flash is evaluation-only and replays a plan from memory, re-localizing "
-        "each waypoint's anchor.",
+        "each waypoint's anchor; flash_evolve runs Flash first, escalates to a slow "
+        "LLM planner on anomaly without reset, and compiles rescues back into Flash memory.",
+    )
+    ap.add_argument(
+        "--flash-slow-planner",
+        default="codex",
+        choices=["api", "claude_code", "codex"],
+        help="Slow fallback planner used by --planner flash_evolve (default: codex).",
+    )
+    ap.add_argument(
+        "--flash-memory-dir",
+        type=Path,
+        default=None,
+        help="Writable directory storing evolved Flash plans for --planner flash_evolve "
+        "(defaults to <memory_dir>/flash_evolved).",
+    )
+    ap.add_argument(
+        "--flash-evolve",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Persist newly compiled Flash plans and recovery branches during "
+        "--planner flash_evolve (default: enabled).",
     )
     ap.add_argument(
         "--model",
@@ -386,17 +407,33 @@ def main() -> int:
         if sys.stdin is None or not sys.stdin.isatty():
             parser.error("This robot requires a TTY for operator confirmation.")
     native_cli = args.interactive and args.planner == "api"
-    if args.base_url and args.planner in BASE_URL_ENV_BY_PLANNER:
+    if args.base_url and (
+        args.planner in BASE_URL_ENV_BY_PLANNER
+        or (
+            args.planner == "flash_evolve"
+            and args.flash_slow_planner in BASE_URL_ENV_BY_PLANNER
+        )
+    ):
+        effective = (
+            args.flash_slow_planner if args.planner == "flash_evolve" else args.planner
+        )
         parser.error(
             "--base-url applies to the 'api' planner only; "
-            f"{args.planner} reads its endpoint from "
-            f"{BASE_URL_ENV_BY_PLANNER[args.planner]} instead"
+            f"{effective} reads its endpoint from "
+            f"{BASE_URL_ENV_BY_PLANNER[effective]} instead"
         )
     if args.planner == "flash":
         if args.explore:
             parser.error("Flash Mode is evaluation-only; remove --explore")
         if robot_spec.run_flash is None:
             parser.error(f"Flash Mode is not supported for robot {args.robot_name!r}")
+    if args.planner == "flash_evolve":
+        if args.explore:
+            parser.error("Flash-Evolve Mode is evaluation-only; remove --explore")
+        if robot_spec.run_flash_evolve is None:
+            parser.error(
+                f"Flash-Evolve Mode is not supported for robot {args.robot_name!r}"
+            )
     if args.explore and not robot_spec.supports_exploration:
         detail = (
             " Real-robot exploration requires operator-mediated scene restoration "
@@ -473,6 +510,9 @@ def main() -> int:
         dashboard_events=dashboard_events,
         no_images=args.no_images,
         interactive=args.interactive,
+        flash_slow_planner=args.flash_slow_planner,
+        flash_memory_dir=args.flash_memory_dir,
+        flash_evolve=args.flash_evolve,
     )
     prompt_bundle = robot_spec.prompts
     prompt_vars = {**prompt_vars, "output_dir": output_dir}

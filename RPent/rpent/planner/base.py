@@ -43,9 +43,15 @@ MCP_TOOL_PREFIX = "mcp__rpent__"
 REASONING_EFFORTS = ("none", "low", "medium", "high", "xhigh")
 
 
-def resolve_model(planner: str, model: str | None) -> str | None:
+def resolve_model(
+    planner: str,
+    model: str | None,
+    *,
+    flash_slow_planner: str = "codex",
+) -> str | None:
     """Resolve the model using the planner's explicit/environment precedence."""
-    return model or (os.environ.get("CODEX_MODEL") if planner == "codex" else None)
+    effective = flash_slow_planner if planner == "flash_evolve" else planner
+    return model or (os.environ.get("CODEX_MODEL") if effective == "codex" else None)
 
 
 def add_mcp_prefix(name: str) -> str:
@@ -227,6 +233,9 @@ def build_planner(
     dashboard_events: DashboardEventSink,
     no_images: bool = False,
     interactive: bool = False,
+    flash_slow_planner: str = "codex",
+    flash_memory_dir: str | Path | None = None,
+    flash_evolve: bool = True,
 ) -> Planner:
     """Build a planner for the given backend, resolving credentials from env vars."""
     # Imports are deferred to avoid a circular import: api_loop / claude_code /
@@ -295,5 +304,42 @@ def build_planner(
         return FlashPlanner(
             recipe_tag=recipe_tag,
             robot_name=robot_name,
+        )
+    if planner_type == "flash_evolve":
+        from rpent.planner.flash_evolve import FlashEvolvePlanner
+
+        if flash_slow_planner not in {"api", "claude_code", "codex"}:
+            raise ValueError(
+                f"flash_slow_planner must be api, claude_code or codex; got {flash_slow_planner!r}"
+            )
+        slow_planner = build_planner(
+            flash_slow_planner,
+            output_dir=output_dir,
+            recipe_tag=recipe_tag,
+            robot_name=robot_name,
+            base_url=base_url,
+            model=model,
+            memory_dir=memory_dir,
+            max_tokens=max_tokens,
+            planner_timeout_s=planner_timeout_s,
+            reasoning_effort=reasoning_effort,
+            claude_code_max_budget_usd=claude_code_max_budget_usd,
+            dashboard_events=dashboard_events,
+            no_images=no_images,
+            interactive=interactive,
+        )
+        resolved_flash_dir = (
+            Path(flash_memory_dir)
+            if flash_memory_dir is not None
+            else get_memory_dir(robot_name) / "flash_evolved"
+        )
+        return FlashEvolvePlanner(
+            recipe_tag=recipe_tag,
+            robot_name=robot_name,
+            slow_planner=slow_planner,
+            slow_planner_name=flash_slow_planner,
+            flash_memory_dir=resolved_flash_dir,
+            output_dir=output_dir,
+            evolve_enabled=flash_evolve,
         )
     raise ValueError(f"unknown planner_type: {planner_type}")

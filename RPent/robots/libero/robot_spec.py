@@ -115,6 +115,13 @@ def _run_flash(toolkit, cell_tag: str, note) -> dict:
     return run_flash(toolkit, cell_tag, note)
 
 
+def _run_flash_evolve(toolkit, cell_tag: str, **kwargs: Any) -> dict:
+    """Run System-1 Flash with slow-planner handover and procedural evolution."""
+    from robots.libero.flash import run_flash_evolve
+
+    return run_flash_evolve(toolkit, cell_tag, **kwargs)
+
+
 def get_robot_spec() -> RobotSpec:
     """Return the LIBERO robot identity, prompt bundle, and runner hooks.
 
@@ -135,6 +142,7 @@ def get_robot_spec() -> RobotSpec:
         dashboard=LIBERO_DASHBOARD_SPEC,
         supports_exploration=True,
         run_flash=_run_flash,
+        run_flash_evolve=_run_flash_evolve,
         validate_args=validate_options,
         prepare_memory=prepare_memory,
     )
@@ -346,8 +354,17 @@ def _parse_config(args: argparse.Namespace) -> RunConfig:
             )
         if args.molmo_endpoint is None:
             raise ValueError("--planner flash requires --molmo-endpoint")
+    elif planner == "flash_evolve":
+        if getattr(args, "explore", False):
+            raise ValueError("Flash-Evolve Mode is evaluation-only; remove --explore")
+        if args.suite not in FLASH_SUITES:
+            supported = ", ".join(sorted(FLASH_SUITES))
+            raise ValueError(
+                f"--planner flash_evolve does not support --suite {args.suite!r}; "
+                f"supported suites: {supported}"
+            )
     elif args.molmo_endpoint is not None:
-        raise ValueError("--molmo-endpoint requires --planner flash")
+        raise ValueError("--molmo-endpoint requires --planner flash or flash_evolve")
 
     recipe_tag = f"{args.suite.replace('libero_', '')}_t{args.task}_s{args.seed}"
     explore = bool(getattr(args, "explore", False))
@@ -600,7 +617,10 @@ def _init_runtime(
         "molmo": lambda rpc: {"molmo_client": MolmoClient(rpc)},
     }
     selected = set(starters) if components is None else set(components)
-    if getattr(args, "planner", None) != "flash":
+    planner = getattr(args, "planner", None)
+    if planner != "flash" and not (
+        planner == "flash_evolve" and getattr(args, "molmo_endpoint", None) is not None
+    ):
         selected.discard("molmo")
     unknown = selected.difference(starters)
     if unknown:

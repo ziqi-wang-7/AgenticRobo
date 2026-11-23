@@ -148,6 +148,21 @@ def command(batch: Path, cell: dict, deployment: dict) -> list[str]:
                 )
                 if plan.get("action_evidence", False):
                     argv.append("--memcodex-action-evidence")
+        elif plan.get("condition") == "flash_evolve":
+            planner_idx = argv.index("--planner")
+            argv[planner_idx + 1] = "flash_evolve"
+            argv.extend(
+                [
+                    "--flash-slow-planner",
+                    str(plan.get("flash_slow_planner", "codex")),
+                    "--flash-memory-dir",
+                    str(plan["flash_memory_dir"]),
+                ]
+            )
+            if not plan.get("flash_evolve_enabled", True):
+                argv.append("--no-flash-evolve")
+            if plan.get("molmo_endpoint"):
+                argv.extend(["--molmo-endpoint", str(plan["molmo_endpoint"])])
     return argv
 
 
