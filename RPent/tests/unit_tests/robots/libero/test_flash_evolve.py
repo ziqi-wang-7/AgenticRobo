@@ -51,6 +51,7 @@ class FakeLiberoToolkit:
         task_language: str = "pick up the black bowl and place it on the plate",
         fail_first_pick_prompt: str | None = None,
         stall_move_to_y_above: float | None = None,
+        surface_z: float | None = None,
         solve_on_release: bool = True,
     ) -> None:
         self.state = EnvState(tmp_dir / "state")
@@ -59,6 +60,7 @@ class FakeLiberoToolkit:
         self._anchors_xyz = {k: list(v) for k, v in anchors_xyz.items()}
         self._fail_first_pick_prompt = fail_first_pick_prompt
         self._stall_move_to_y_above = stall_move_to_y_above
+        self._surface_z = surface_z
         self._solve_on_release = solve_on_release
         self._solved = False
         self._holding = False
@@ -100,7 +102,13 @@ class FakeLiberoToolkit:
         result_payload: dict[str, Any] = {"ok": True}
         if name in {"move_to", "move_pose"}:
             xyz = list(args["xyz"])
-            if (
+            if self._surface_z is not None and xyz[2] < self._surface_z:
+                self._eef = [*xyz[:2], self._surface_z]
+                result_payload = {
+                    "final_dist_m": self._surface_z - xyz[2],
+                    "steps_used": args.get("max_steps", 80),
+                }
+            elif (
                 name == "move_to"
                 and self._stall_move_to_y_above is not None
                 and abs(float(xyz[1])) > self._stall_move_to_y_above
@@ -203,7 +211,10 @@ def test_recovery_uses_its_observed_anchor_and_recorded_grasp(tmp_path: Path) ->
     from robots.libero.flash.replay import replay_with_evolution
 
     toolkit = FakeLiberoToolkit(
-        tmp_path, memory_root=tmp_path, anchors_xyz={"rim": [0.16, 0.02, 0.5]}
+        tmp_path,
+        memory_root=tmp_path,
+        anchors_xyz={"rim": [0.16, 0.02, 0.5]},
+        stall_move_to_y_above=0.025,
     )
     # The slow planner used a wrist-only reading after the main path moved the arm.
     # Its taught grasp has a different acceptance threshold from the base Flash pick.
@@ -236,6 +247,10 @@ def test_recovery_uses_its_observed_anchor_and_recorded_grasp(tmp_path: Path) ->
         branch_matcher=lambda *_args, **_kwargs: branch,
     )
     assert result["mode"] == "flash_branch"
+    assert any(
+        item.get("servo_residual") and item.get("branch_id") == "rim-grasp"
+        for item in result["executed_trace"]
+    )
     assert result["failure_step"] == 1
     assert [name for name, _ in toolkit.executed] == [
         "move_to",
@@ -452,7 +467,44 @@ def test_closed_loop_handover_patch_and_zero_token_branch_hit(tmp_path: Path) ->
     assert stats["failures"] == 0
 
 
-def test_motion_stall_triggers_handover_and_bad_branch_demotion(tmp_path: Path) -> None:
+@pytest.mark.parametrize("servo", ["move_to", "move_pose"])
+def test_surface_press_continues_to_release_without_handover(tmp_path, servo):
+    store = tmp_path / "store"
+    store.mkdir()
+    plan = [
+        {"action": "pi0_pick", "arguments": {"prompt": "pick up the mug"}},
+        {"action": servo, "arguments": {"xyz": [0.1, 0.2, 0.46], "gripper": 1}},
+        {"action": "release", "arguments": {}},
+    ]
+    (store / "10_swap_t6_plan.json").write_text(json.dumps({"plan": plan}))
+    (store / "10_swap_t6_anchors.json").write_text('{"anchors":[]}')
+    tk = FakeLiberoToolkit(
+        tmp_path, memory_root=tmp_path, anchors_xyz={}, surface_z=0.51
+    )
+    out = run_flash_evolve(
+        tk,
+        "10_swap_t6_s1",
+        slow_solve=lambda msg: pytest.fail(msg),
+        user_message="place the mug",
+        flash_memory_dir=store,
+        output_dir=tmp_path,
+    )
+    trace = json.loads((tmp_path / "flash_evolve_trace.json").read_text())
+    assert out["done"] and trace["execution_mode"] == "flash_fast"
+    assert [item["action"] for item in trace["executed_trace"]] == [
+        "pi0_pick",
+        servo,
+        "release",
+    ]
+    press = trace["executed_trace"][1]
+    assert press["servo_residual"] and press["final_dist_m"] == pytest.approx(0.05)
+    assert press["eef_xyz"] == [0.1, 0.2, 0.51]
+    assert trace["failure"] is None
+
+
+def test_exhausted_plan_hands_over_after_release_and_bad_branch_demotion(
+    tmp_path: Path,
+) -> None:
     memory_root = tmp_path / "corpus"
     store_dir = tmp_path / "flash_evolved"
     _write_seed0_task_specific(memory_root)
@@ -467,9 +519,14 @@ def test_motion_stall_triggers_handover_and_bad_branch_demotion(tmp_path: Path) 
             "the plate": [-0.08, 0.30, 0.50],
         },
         stall_move_to_y_above=0.25,
+        solve_on_release=False,
     )
 
-    def slow_use_move_pose(_msg: str) -> PlannerResult:
+    def slow_use_move_pose(msg: str) -> PlannerResult:
+        assert [action for action, _ in tk.executed][-2:] == ["move_to", "release"]
+        assert "plan_incomplete" in msg and "final_dist_m=0.08" in msg
+        tk._solve_on_release = True
+        tk.execute_tool("pi0_pick", {"prompt": "pick up the bowl"})
         tk.execute_tool("move_pose", {"xyz": [-0.08, 0.30, 0.70], "gripper": 1})
         tk.execute_tool("release", {})
         return PlannerResult(finish_result={"status": "success"})
@@ -482,7 +539,7 @@ def test_motion_stall_triggers_handover_and_bad_branch_demotion(tmp_path: Path) 
         flash_memory_dir=store_dir,
     )
     assert out["done"] is True
-    assert out["trace"]["failure"]["failure_kind"] == "motion_stalled"
+    assert out["trace"]["failure"]["failure_kind"] == "plan_incomplete"
     branch_id = out["trace"]["patched_branch_id"]
 
     # Record 3 consecutive failures -> branch must be automatically demoted
@@ -1034,8 +1091,8 @@ def test_fold_null_events_keeps_waypoints_and_removes_verified_redundancy() -> N
     ]
 
     kept, steps, folded = fold_null_events(records)
-    assert folded == 3
-    assert steps == [1, 3, 4, 5, 7, 8, 10, 11, 12]
+    assert folded == 2
+    assert steps == [1, 3, 4, 5, 7, 8, 9, 10, 11, 12]
     assert [c["action"] for c in kept] == [
         "move_to",
         "move_to",
@@ -1043,6 +1100,7 @@ def test_fold_null_events_keeps_waypoints_and_removes_verified_redundancy() -> N
         "move_to",
         "pi0_pick",
         "set_gripper",
+        "move_to",
         "move_pose",
         "move_pose",
         "release",
@@ -1092,6 +1150,61 @@ def test_stalled_approach_before_contact_and_episode_boundary(boundary):
         StepRecord(4, {}, command={"action": "release"}),
     ]
     assert fold_null_events(trajectory)[1] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("delta", "grip", "target_z", "next_action", "next_grip", "fold"),
+    [
+        (0.0, -1, 0.72, "move_pose", -1, True),
+        (0.0049, -1, 0.72, "move_pose", -1, True),
+        (0.005, -1, 0.72, "move_pose", -1, False),
+        (0.07, -1, 0.72, "move_pose", -1, False),
+        (None, -1, 0.72, "move_pose", -1, False),
+        (0.0, -1, 0.72, "move_pose", 1, False),
+        (0.0, -1, 0.46, "move_pose", -1, False),
+        (0.0, 1, 0.72, "move_pose", 1, False),
+        (0.0, 1, 0.46, "release", 1, False),
+        (0.03, 1, 0.72, "move_to", 1, False),
+        (0.0, -1, 0.72, "set_gripper", 1, False),
+        (0.0, 1, 0.72, "pi0_doubled", 1, False),
+    ],
+)
+def test_fold_requires_measured_stationary_noncontact_pose_replacement(
+    delta, grip, target_z, next_action, next_grip, fold
+):
+    xyz = [0.12, 0, target_z]
+    retry = {"action": next_action}
+    if next_action in {"move_pose", "move_to"}:
+        retry.update(xyz=xyz, gripper=next_grip)
+    if next_action == "move_pose":
+        retry["target_pitch"] = 0.3
+    before = {} if delta is None else {"robot0_eef_pos": [0, 0, 0.72]}
+    steps = [
+        StepRecord(4, before, command={"action": "pi0_pick"}),
+        StepRecord(
+            5,
+            {"robot0_eef_pos": [delta or 0, 0, 0.72]},
+            command={"action": "move_to", "xyz": xyz, "gripper": grip, "max_steps": 80},
+            result={"final_dist_m": 0.08, "steps_used": 80},
+        ),
+        StepRecord(6, {}, command=retry, result={"final_dist_m": 0.003}),
+    ]
+    assert fold_null_events(steps, after_step=4)[1] == ([6] if fold else [5, 6])
+
+
+def test_failed_grasp_cannot_fold_a_previous_residual():
+    cmd = {"action": "move_to", "xyz": [0.1, 0.0, 0.6]}
+    steps = [
+        StepRecord(1, {}, command=cmd, result={"final_dist_m": 0.07, "steps_used": 80}),
+        StepRecord(
+            2,
+            {},
+            command={"action": "pi0_pick", "prompt": "pick up the mug"},
+            result={"success": False},
+        ),
+        StepRecord(3, {}, command=cmd, result={"final_dist_m": 0.002}),
+    ]
+    assert fold_null_events(steps)[1] == [1, 3]
 
 
 def test_fold_null_events_preserves_contact_skill_pi0_pick() -> None:

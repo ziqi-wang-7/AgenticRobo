@@ -29,6 +29,7 @@ correct answer.
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -455,18 +456,23 @@ def replay(
     return {"done": finished(), "anchors": len(live), "plan": len(plan)}
 
 
-def _eef_snapshot(state: EnvState) -> dict[str, list[float] | None]:
-    """Keep a measured xy when an older observation has no height."""
+def _measured_eef(state: EnvState) -> np.ndarray | None:
     record = state.latest_record()
     pos = (record.state or {}).get("robot0_eef_pos") if record else None
-    xy = xyz = None
     if isinstance(pos, (list, tuple, np.ndarray)) and len(pos) >= 2:
         observed = np.asarray(pos[:3], dtype=float)
         if np.isfinite(observed[:2]).all():
-            xy = observed[:2].round(4).tolist()
-            if len(observed) == 3 and np.isfinite(observed[2]):
-                xyz = observed.round(4).tolist()
-    return {"eef_xy": xy, "eef_xyz": xyz}
+            return observed if np.isfinite(observed).all() else observed[:2]
+    return None
+
+
+def _eef_snapshot(state: EnvState) -> dict[str, list[float] | None]:
+    """Keep a measured xy when an older observation has no height."""
+    eef = _measured_eef(state)
+    return {
+        "eef_xy": eef[:2].round(4).tolist() if eef is not None else None,
+        "eef_xyz": eef.round(4).tolist() if eef is not None and len(eef) == 3 else None,
+    }
 
 
 def _episode_ended(toolkit: Any) -> bool:
@@ -783,20 +789,35 @@ def _survey_live_anchors(
         if locator_of.get(phrase) == "segment":
             continue
         try:
-            call_tool(
-                "move_to",
-                {
-                    "xyz": [
-                        round(float(coarse.xy[0]), 4),
-                        round(float(coarse.xy[1]), 4),
-                        float(hover),
-                    ],
-                    "gripper": -1,
-                    "step_clip": 0.02,
-                    "max_steps": 150,
-                    "tol": 0.012,
-                },
-            )
+            eef = _measured_eef(state)
+            if eef is None:
+                raise ValueError("Missing measured EEF position for the wrist approach")
+            distance = np.linalg.norm(coarse.xy - eef[:2])
+            # Even segment counts visit the midpoint; very wide traversals
+            # also split each half to keep it within the OSC travel limit.
+            hops = 1 if distance <= 0.28 else 2 * math.ceil(distance / (2 * 0.28))
+            waypoints = np.linspace(eef[:2], coarse.xy, hops + 1)[1:]
+            for xy in waypoints:
+                position = _measured_eef(state)
+                if (
+                    position is None
+                    or np.linalg.norm(xy.round(4) - position[:2]) > 0.30
+                ):
+                    raise ValueError(
+                        "Next wrist waypoint exceeds 0.30 m from the measured EEF"
+                    )
+                call_tool(
+                    "move_to",
+                    {
+                        "xyz": [*xy.round(4).tolist(), float(hover)],
+                        "gripper": -1,
+                        "step_clip": 0.02,
+                        "max_steps": 150,
+                        "tol": 0.012,
+                    },
+                )
+                if _episode_ended(toolkit):
+                    break
             if _episode_ended(toolkit):
                 break
             close = locate(
@@ -883,14 +904,12 @@ def _run_anchored_sequence(
             and record is not None
             and motion_alert(record)
         ):
-            entry["status"] = "motion_stalled"
-            fail(
-                idx,
-                name,
-                anchor,
-                "motion_stalled",
-                f"{name} stalled with servo residual exceeding tolerance",
-                args["xyz"],
+            entry.update(
+                servo_residual=True,
+                target_xyz=args["xyz"],
+                eef_xyz=_eef_snapshot(state)["eef_xyz"],
+                final_dist_m=record.result["final_dist_m"],
+                tol_m=record.command.get("tol", 0.012),
             )
         elif check_grasp and not pick_succeeded(raw):
             entry["status"] = "pick_failed"

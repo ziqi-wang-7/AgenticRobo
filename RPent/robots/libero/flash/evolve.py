@@ -15,7 +15,7 @@
 """Fast-Slow procedural memory evolution for LIBERO Flash plans.
 
 System 1 (Flash) executes an anchor-relative procedural plan with zero LLM
-tokens.  When Flash encounters an anomaly (missed grasp, servo stall, missing
+tokens.  When Flash encounters an anomaly (missed grasp, unreachable target, missing
 anchor, primitive error, or an unfinished goal), it first tries any matching
 learned recovery branch at zero LLM cost.  If no learned branch resolves the
 episode, System 2 (a slow LLM planner such as Codex) takes over in-place
@@ -355,8 +355,7 @@ def match_recovery_branch(
 _JITTER_TOL_M = 0.015
 
 
-def _cmd_xyz(cmd: Mapping[str, Any]) -> tuple[float, float, float] | None:
-    xyz = cmd.get("xyz")
+def _xyz(xyz: Any) -> tuple[float, float, float] | None:
     if (
         isinstance(xyz, (list, tuple))
         and len(xyz) == 3
@@ -380,7 +379,7 @@ def _redundant_servo_check(previous: Mapping[str, Any], record: StepRecord) -> b
     ):
         return False
 
-    xyz, prior_xyz = _cmd_xyz(cmd), _cmd_xyz(previous)
+    xyz, prior_xyz = _xyz(cmd.get("xyz")), _xyz(previous.get("xyz"))
     if xyz is None or prior_xyz is None:
         return False
     tol = cmd.get("tol", 0.012)
@@ -392,7 +391,10 @@ def _redundant_servo_check(previous: Mapping[str, Any], record: StepRecord) -> b
 
 
 def _reached_same_target(
-    original: Mapping[str, Any], next_record: StepRecord | None
+    original: Mapping[str, Any],
+    next_record: StepRecord | None,
+    *,
+    pose_retry: bool = False,
 ) -> bool:
     """Check for a successful Cartesian replacement with the same gripper and pose constraints."""
     if next_record is None or original["action"] not in MOVE_ACTIONS:
@@ -406,16 +408,16 @@ def _reached_same_target(
         or result.get("interrupted")
     ):
         return False
-    target = _cmd_xyz(original)
-    if target is None or target != _cmd_xyz(retry):
+    target = _xyz(original.get("xyz"))
+    if target is None or target != _xyz(retry.get("xyz")):
         return False
     if original.get("gripper", -1) != retry.get("gripper", -1):
         return False
-    # A rotation may still be in progress when the translation reaches its target.
-    # Leave orientation-controlled waypoints to the demonstrated sequence.
+    # A pose retry can add rotation to solve the original translation. Never
+    # discard an original command that was also working on a rotation.
     if any(
         cmd.get(axis) is not None
-        for cmd in (original, retry)
+        for cmd in ((original,) if pose_retry else (original, retry))
         for axis in ("target_pitch", "target_yaw")
     ):
         return False
@@ -425,8 +427,30 @@ def _reached_same_target(
     )
 
 
+def _stationary_pose_retry(
+    previous: StepRecord | None, record: StepRecord, following: StepRecord | None
+) -> bool:
+    """Recognize a stationary translation immediately replaced by a successful pose servo."""
+    cmd = record.command
+    if (
+        previous is None
+        or cmd["action"] != "move_to"
+        or following is None
+        or following.command["action"] != "move_pose"
+        or not _reached_same_target(cmd, following, pose_retry=True)
+    ):
+        return False
+    before = _xyz((getattr(previous, "state", None) or {}).get("robot0_eef_pos"))
+    after = _xyz((getattr(record, "state", None) or {}).get("robot0_eef_pos"))
+    if before is None or after is None or math.dist(before, after) >= 0.005:
+        return False
+    # The recorded state has no contact sensor. A downward target can seat
+    # the tool on a surface; a closed hand can push even with little EEF travel.
+    return cmd["xyz"][2] >= max(before[2], after[2]) and cmd.get("gripper", -1) == -1
+
+
 def fold_null_events(
-    records: Sequence[StepRecord],
+    records: Sequence[StepRecord], *, after_step: int = -1
 ) -> tuple[list[dict[str, Any]], list[int], int]:
     """Remove failed ordinary grasps and redundant motions before compilation.
 
@@ -438,9 +462,15 @@ def fold_null_events(
         ``(kept_commands, kept_step_indices, folded_count)``.
     """
     raw: list[StepRecord] = []
+    by_step: dict[int, StepRecord] = {}
     for rec in records:
         cmd = rec.command
-        if isinstance(cmd, dict) and cmd.get("action") in PRIMITIVE_ACTIONS:
+        by_step[rec.step_idx] = rec
+        if (
+            rec.step_idx > after_step
+            and isinstance(cmd, dict)
+            and cmd.get("action") in PRIMITIVE_ACTIONS
+        ):
             raw.append(rec)
         if rec.terminated or rec.truncated:
             break
@@ -454,7 +484,9 @@ def fold_null_events(
         following = raw[idx + 1] if idx + 1 < len(raw) else None
         if following is not None and following.step_idx != rec.step_idx + 1:
             following = None
-        if motion_alert(rec) and _reached_same_target(cmd, following):
+        if motion_alert(rec) and _stationary_pose_retry(
+            by_step.get(rec.step_idx - 1), rec, following
+        ):
             continue
         if (
             cmd["action"] == "pi0_pick"
@@ -466,6 +498,7 @@ def fold_null_events(
                 stage1
                 and stage1[-1].step_idx == rec.step_idx - 1
                 and stage1[-1].command.get("gripper", -1) == -1
+                and not motion_alert(stage1[-1])
                 and _reached_same_target(stage1[-1].command, following)
             ):
                 stage1.pop()
@@ -480,7 +513,10 @@ def fold_null_events(
         consecutive = previous_step == rec.step_idx - 1
         previous_step = rec.step_idx
         if not (
-            consecutive and stage2 and _redundant_servo_check(stage2[-1].command, rec)
+            consecutive
+            and stage2
+            and not motion_alert(rec)
+            and _redundant_servo_check(stage2[-1].command, rec)
         ):
             stage2.append(rec)
 
@@ -533,7 +569,7 @@ def compile_recovery_branch(
 ) -> dict[str, Any] | None:
     """Compile post-handover slow-planner recovery steps into a Flash branch."""
     raw_commands, step_indices, folded_nulls = fold_null_events(
-        [rec for rec in state.records() if rec.step_idx > handover_step]
+        state.records(), after_step=handover_step
     )
     if not raw_commands:
         return None
@@ -883,6 +919,16 @@ def build_handover_message(
         f"- Current eef_xyz (m): {eef if eef is not None else 'unavailable'}\n"
         f"- failed_target_xyz (m): {failure.get('failed_target_xyz') or 'unavailable'}\n"
     )
+    residuals = [item for item in executed if item.get("servo_residual")]
+    if residuals:
+        last = residuals[-1]
+        origin = f"branch {last['branch_id']} " if last.get("branch_id") else ""
+        geometry += (
+            f"- Servo residuals during replay: {len(residuals)}. Latest: "
+            f"{origin}plan[{last['plan_idx']}] {last['action']}, target_xyz={last['target_xyz']}, "
+            f"eef_xyz={last['eef_xyz']}, final_dist_m={last['final_dist_m']}, tol_m={last['tol_m']}. "
+            "A press or a capped transport hop can end this way. Inspect the current scene for progress.\n"
+        )
     if failure.get("failure_kind") == "motion_stalled":
         if failure.get("target_attempted") is False:
             geometry += "The target was rejected by the workspace check before motion. Re-localize and plan a reachable waypoint.\n"
@@ -915,7 +961,7 @@ def build_handover_message(
         f"(step {handover_step}) and gripper state.\n"
         "2. Do NOT call finish with terminated:false before exhausting applicable physical "
         "recovery levers within this episode's budget. Re-localize in agentview_high.png via "
-        "back_project. Switch move_to to move_pose near IK walls. For a missed grasp, walk "
+        "back_project. If you verify a stationary IK stall, try move_pose. For a missed grasp, walk "
         "the pi0_pick prompt ladder. For drawers or doors, use pi0_doubled or short capped "
         "pushes and verify progress after contact. Stop on environment termination or truncation.\n"
         "=====================================================================\n"
@@ -1085,6 +1131,7 @@ def run_flash_evolve(
     )
     trace_summary["fast_actions"] = int(replay_outcome.get("executed_steps", 0))
     trace_summary["physical_action_calls"] = replay_outcome["physical_action_calls"]
+    trace_summary["executed_trace"] = replay_outcome.get("executed_trace", [])
     trace_summary["anchors"] = int(replay_outcome.get("anchors", 0))
     trace_summary["branch_attempts"] = list(replay_outcome.get("branch_attempts") or [])
     trace_summary["failure"] = replay_outcome.get("failure")

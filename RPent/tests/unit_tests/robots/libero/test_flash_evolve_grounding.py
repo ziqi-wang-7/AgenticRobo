@@ -286,7 +286,7 @@ def test_anchor_miss_after_gripper_action_uses_in_place_recovery(tmp_path):
     assert not tk.reset_called
 
 
-def test_stalled_drawer_reports_retargeted_xyz_and_instruction_level(tmp_path: Path):
+def test_exhausted_drawer_plan_reports_residual_and_instruction_level(tmp_path: Path):
     phrase = "the top drawer handle"  # The historical anchor conflicts with the live instruction.
     tk = FakeLiberoToolkit(
         tmp_path,
@@ -297,15 +297,19 @@ def test_stalled_drawer_reports_retargeted_xyz_and_instruction_level(tmp_path: P
     )
     out = replay_with_evolution(tk, None, anchored_plan(phrase))
     failure = out["failure"]
-    assert failure["failure_kind"] == "motion_stalled"
+    assert failure["failure_kind"] == "plan_incomplete"
     assert failure["eef_xyz"] == [0, 0, 0.72]
-    assert failure["failed_target_xyz"] == pytest.approx([0.09, -0.33, 0.72])
+    assert failure["failed_target_xyz"] is None
+    residual = out["executed_trace"][-1]
+    assert residual["servo_residual"] is True
+    assert residual["target_xyz"] == pytest.approx([0.09, -0.33, 0.72])
     assert failure["anchor_xy"] == [0.08, -0.32]
     assert out["physical_action_calls"] == out["handover_step"] == 1
     msg = build_handover_message("Task", plan_name="drawer", replay_outcome=out)
     assert "SYSTEM-1 FLASH HANDOVER" in msg and "PRE-EXECUTION" not in msg
     assert "eef_xyz (m): [0.0, 0.0, 0.72]" in msg
-    assert "failed_target_xyz (m): [0.09, -0.33, 0.72]" in msg
+    assert "target_xyz=[0.09, -0.33, 0.72]" in msg
+    assert "final_dist_m=0.08" in msg and "tol_m=0.012" in msg
     assert (
         "TARGET DRAWER LEVEL: bottom" in msg and "TARGET DRAWER LEVEL: top" not in msg
     )
@@ -313,14 +317,74 @@ def test_stalled_drawer_reports_retargeted_xyz_and_instruction_level(tmp_path: P
         lever in msg
         for lever in (
             "move_pose",
-            "target_pitch",
-            "target_yaw",
             "back_project",
             "pi0_pick",
             "pi0_doubled",
         )
     )
     assert "clean and concise" not in msg and not tk.reset_called
+
+
+@pytest.mark.parametrize(
+    ("start_x", "coarse_x", "outcome", "xs"),
+    [
+        (0, 0.28, "reached", [0.28]),
+        (0, 0.28002, "reached", [0.14, 0.28]),
+        (0, 0.38, "reached", [0.19, 0.38]),
+        (-0.42, 0.42, "reached", [-0.21, 0, 0.21, 0.42]),
+        (0, 0.38, "truncated", [0.19]),
+        (0, 0.38, "stationary", [0.19]),
+    ],
+)
+def test_molmo_refinement_splits_long_xy_move_and_stops_on_truncation(
+    tmp_path, monkeypatch, start_x, coarse_x, outcome, xs
+):
+    from robots.libero.flash import replay
+
+    tk = FakeLiberoToolkit(
+        tmp_path,
+        memory_root=tmp_path,
+        anchors_xyz={},
+        stall_move_to_y_above=-1 if outcome == "stationary" else None,
+    )
+    if start_x:
+        tk.execute_tool("move_to", {"xyz": [start_x, 0, 0.72]})
+        tk.executed.clear()
+    opening = tk.state.latest_step
+    cameras = []
+
+    def locate(_molmo, state, step, camera, query):
+        cameras.append((camera, step))
+        return {"xy": np.array([coarse_x, 0.0])}
+
+    def move(name, args):
+        tk.execute_tool(name, args)
+        if outcome == "truncated":
+            with tk.state.record_step(
+                state={"robot0_eef_pos": args["xyz"]}, truncated=True
+            ):
+                pass
+        return {}
+
+    monkeypatch.setattr(replay, "locate", locate)
+    replay._survey_live_anchors(
+        tk,
+        object(),
+        reference={"mug": np.zeros(2)},
+        locator_of={"mug": "molmo"},
+        camera_of={},
+        plan=[{"action": "move_to", "arguments": {"xyz": [0.0, 0.0, 0.81]}}],
+        opening=opening,
+        note=lambda _: None,
+        allow_sam3_fallback=False,
+        call_tool=move,
+    )
+    assert [args["xyz"] for _, args in tk.executed] == [[x, 0.0, 0.81] for x in xs]
+    assert cameras == (
+        [("agentview", opening), ("wrist", opening + len(xs))]
+        if outcome == "reached"
+        else [("agentview", opening)]
+    )
 
 
 def test_microwave_prompt_guides_a_physical_attempt():
