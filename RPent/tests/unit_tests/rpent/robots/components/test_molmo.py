@@ -62,6 +62,17 @@ def test_parse_molmo2_point() -> None:
     assert _parse_point('<points coords="1 125 875"/>') == (125.0, 875.0)
 
 
+def test_parse_observed_frame_and_point_ids() -> None:
+    answer = '<points coords="1 1 604 655">left moka pot grip point</points><|im_end|>'
+    assert _parse_point(answer) == (604.0, 655.0)
+
+
+@pytest.mark.parametrize("separator", [";", ":", ",", "\t"])
+def test_parse_first_point_in_first_frame(separator: str) -> None:
+    coords = f"1 7 008 999 8 420 301{separator}2 1 017 250"
+    assert _parse_point(f'<points coords="{coords}"/>') == (8.0, 999.0)
+
+
 def test_parse_first_of_multiple_points() -> None:
     assert _parse_point('<points coords="1 125 875; 2 500 600"/>') == (
         125.0,
@@ -72,6 +83,8 @@ def test_parse_first_of_multiple_points() -> None:
 def test_reject_invalid_or_out_of_range_point() -> None:
     assert _parse_point("This isn't in the image.") is None
     assert _parse_point('<points coords="1 1001 200"/>') is None
+    assert _parse_point('<points coords="1 1 604 1001"/>') is None
+    assert _parse_point('<points coords="1 1 604 655 123"/>') is None
 
 
 def test_molmo_ground_is_a_readonly_namespaced_rpc() -> None:

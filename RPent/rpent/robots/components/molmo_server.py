@@ -47,9 +47,14 @@ from rpent.utils.rpc import RpcFacade
 
 logger = get_logger("molmo_server")
 
-#: Molmo2 writes one or more ``point-id x y`` triples in normalized thousandths.
 _COORDS = re.compile(r"<(?:point|points)\b[^>]*\bcoords=[\"']([^\"']+)[\"']", re.I)
-_POINT = re.compile(r"(?:^|[\t:;,])\s*\d+\s+([0-9]{1,4})\s+([0-9]{1,4})")
+# A frame group contains an optional frame ID followed by one or more
+# point-ID/x/y triples. Matching the whole group disambiguates the two IDs.
+_POINT_GROUP = re.compile(
+    r"(?:[0-9]+(?:\.[0-9]+)?\s+)?"
+    r"[0-9]+\s+(?P<x>[0-9]{1,4})\s+(?P<y>[0-9]{1,4})"
+    r"(?:\s+[0-9]+\s+[0-9]{1,4}\s+[0-9]{1,4})*"
+)
 
 
 def _parse_point(answer: str) -> tuple[float, float] | None:
@@ -57,10 +62,11 @@ def _parse_point(answer: str) -> tuple[float, float] | None:
     coords = _COORDS.search(answer)
     if coords is None:
         return None
-    point = _POINT.search(coords.group(1))
+    first_group = re.split(r"[\t:;,]", coords.group(1).strip(), maxsplit=1)[0]
+    point = _POINT_GROUP.fullmatch(first_group.strip())
     if point is None:
         return None
-    x, y = float(point.group(1)), float(point.group(2))
+    x, y = float(point["x"]), float(point["y"])
     if not (0 <= x <= 1000 and 0 <= y <= 1000):
         return None
     return x, y
