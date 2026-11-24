@@ -5,13 +5,15 @@
 1. **自动冷启动与引导（Bootstrap）**：
    * 优先从 `--flash-memory-dir` 加载该任务的 `*_plan.json` 与 `*_anchors.json`。本地语料默认使用 `<memory_dir>/flash_evolved`。HF 语料默认使用所选快照中版本目录旁的 `<version>.flash_evolved`，按语料版本和修订号隔离。
    * 若缺少计划和锚点，先查找语料的 `flash/` 和 `task_card/`。若仍缺失，再从 `task-specific/` 中 seed 0 的审计文件及对应配方编译。使用 `--no-flash-evolve` 可冻结持久记忆，此时初始编译只使用临时目录。
-   * 若完全没有 seed-0 专属经验（例如 `libero_10_swap/t6`），自动回退到慢系统求解，并在求解成功后将轨迹编译为新的 Flash 程序记忆。
+   * 若完全没有 seed-0 专属经验（例如 `GPT_5.5_xhigh` 包中的 `libero_10_swap/t9`），直接由慢系统求解，成功后将轨迹编译为新的 Flash 程序记忆。
 2. **零 Token 快路径与已学恢复分支（System-1 Fast Execution）**：
    * 使用锚点相对偏移（`anchor + offset`）执行操作；支持 **Molmo + SAM3** 双定位，也在不传 `--molmo-endpoint` 时无缝降级为 **SAM3-only** 定位，直接兼容现有 `GPT_6_astra_low` 的两卡部署。
+   * 单用 SAM3 时，方位短语漏检后，在同一张 `agentview_high.png` 的副本上遮住第一个实例，再次分割同类物体。两个掩码均需达到 0.5 分，且在所问方向上相隔超过 4 cm。复数目标交给慢系统分别定位。对微波炉、篮子或碗的内部短语，容器本体的 RGB-D 点云可以提供中心 xy，插入深度仍要从腔内可见表面测量。
    * 实时检测五类物理异常：`anchor_missing`、`pick_failed`、`motion_stalled`（复用 `motion_alert` 伺服残差检测）、`action_error`、`plan_incomplete`。
    * 触发异常时，按异常类型、步骤、锚点和空间范围筛选已学的 `recovery_branches`，优先尝试平滑成功率较高的分支。分支累计尝试至少 3 次且从未成功时，后续回放跳过该分支。环境耗尽步数时，回合以 `flash_truncated` 结束。
 3. **原地慢系统接管与程序修补（Just-in-Time Handover & Procedural Patching）**：
    * 若快路径及已有恢复分支未能使环境终止，**不重置仿真环境（No Reset）**，将当前实时步骤、定位锚点表、已执行步骤和失败诊断打包为接管提示，交给慢系统（如 Codex，完整保留 M0 原生经验包读取能力）原地救场。
+   * `flash_evolve_trace.json` 中的 `fast_actions` 延续原有工具调用计数，`physical_action_calls` 单列物理动作调用。若仅做过感知且在初态缺少锚点，`handoff_type=pre_execution` 提示慢系统从全局定位开始。中途接管记录当前 `eef_xyz`、已知的失败目标 `failed_target_xyz`，以及锚点读数的来源、观测步和可见顶面高度 `z_top`。抽屉任务按当前指令核对把手层级，并用动作前后的图像验证。
    * 编译冷启动计划或恢复分支时，`fold_null_events` 会跳过报错、中断和普通空抓。只有紧随其后的移动确实到达相同目标，才会删去被替代的卡住动作，或空抓前最后一次空夹爪接近动作。重复路点还需满足控制参数相同、目标距离小于位置容差且小于 1.5 cm，并且后一次伺服检查没有推进仿真。实际执行的往返路径会保留。回合日志 `flash_evolve_trace.json` 用 `null_events_folded` 记录本次成功编译时删去的动作数。
    * 转旋钮等接触型 `pi0_pick` 可能返回 `success=false`，因为抬升检测无法反映接触效果。Flash-Evolve 会继续执行后续动作，整项任务按环境终止信号计分。
    * 从原触发位置接管并成功后，系统用实时锚点计算偏移，在文件锁内将恢复分支写入 `*_plan.json`。若先前尝试的分支改变了现场，后续救援动作只适用于改变后的状态。

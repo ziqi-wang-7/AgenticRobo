@@ -108,7 +108,7 @@ DISAMBIGUATION / TARGETING:
   frame-clipped/reflective container is rim-biased, so derive the true cavity
   center from the woven-rim pixels.
 
-PER-TASK RECIPES THAT WORKED AT SEED 0 (adapt coords to your seed):
+TASK-SPECIFIC MECHANICS (ground the targets in this scene):
 - 2-items→basket (t0,t1,t7): place the BOX first into the EMPTY basket interior
   (descend deep, release), then drop/`pi0_pick`-lift the CAN in beside it; a
   rim-perched item can be seated with a closed-gripper downward push.
@@ -146,10 +146,16 @@ PER-TASK RECIPES THAT WORKED AT SEED 0 (adapt coords to your seed):
   (y≈0.075-0.227) — place at the MOUTH (y≈0.13), NOT the deep recess; `pi0_pick`
   the bottle from home pose, `rotate_pitch` it flat ALONG X (the wide footprint),
   release at the mouth, ONE short +y push seats it AND closes the drawer.
-- mug→microwave + close (t9): the only UNSOLVED seed-0 cell — the round mug-in-hand
-  walls ~3cm short of the In() threshold (deep narrow cavity). Try every lever
-  (`pi0_doubled`, `move_pose`, push) and if it still walls, write an honest
-  `terminated:false` with the max eef-y reached."""
+- mug→microwave + close (t9): a shallow release can leave the round mug outside
+  the In() region. Open the door as needed. In `agentview_high.png`, back-project
+  pixels on the opening and on the visible interior floor with `back_project` to
+  measure a deep placement point. Refine from the wrist if the floor is occluded.
+  Grasp the mug and use `move_pose` with the gripper closed to enter the narrow
+  opening. Release on the interior floor. If the mug remains shallow, use a short,
+  capped closed-gripper push into the cavity (+y or -x only when live geometry
+  supports that direction). Check that the mug stays inside as the hand withdraws,
+  then close the door with `pi0_doubled`. While the episode is active, attempt
+  the grasp and deep insertion before ending the run."""
 
 RUNTIME = """A server process (`env_server.py`) is already running. It has Pi0.5 loaded and a
 single-env LIBERO sim. The runner manages the server and exposes structured
@@ -791,9 +797,7 @@ def system_prompt(
 
     return {
         "ROLE AND EVALUATION": ROLE_AND_EVALUATION,
-        "PROVEN LEVERS & LESSONS — libero_10_task seed-0 sweep solved 9/10 (READ THIS)": (
-            PROVEN_LEVERS
-        ),
+        "PROVEN LEVERS & LESSONS": PROVEN_LEVERS,
         "RUNTIME": RUNTIME,
         "YOUR GOAL": GOAL,
         "RULES (NON-NEGOTIABLE)": RULES,

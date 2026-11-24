@@ -33,6 +33,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -788,6 +789,38 @@ def compile_new_plan_from_state(
     }
 
 
+def _pre_execution_handoff(outcome: Mapping[str, Any]) -> bool:
+    trigger = outcome.get("failure") or {}
+    if (trigger.get("branch_failure") or trigger).get(
+        "failure_kind"
+    ) != "anchor_missing":
+        return False
+    step = outcome.get("handover_step")
+    if step is not None:
+        # Read-only survey calls can increment executed_steps even at step zero.
+        return step == 0 and not outcome.get("physical_action_calls")
+    return outcome.get("physical_action_calls", outcome.get("fast_actions")) == 0
+
+
+def _drawer_warning(task: str, anchor: str) -> str:
+    pattern = r"\b(top|upper|middle|bottom|lower)\s+(?:layer\s+of\s+(?:the\s+)?)?(?:drawer|cabinet)\b"
+    for text in (task, anchor):
+        levels = {
+            {"upper": "top", "lower": "bottom"}.get(word, word)
+            for word in re.findall(pattern, text.lower())
+        }
+        if len(levels) > 1:
+            return "Verify the drawer level for the current subtask in the live image before pulling.\n"
+        if levels:
+            return (
+                f"🔴 **TARGET DRAWER LEVEL: {levels.pop()}**. Back-project the target handle "
+                "and compare its height with eef_xyz[2] before contact. Avoid handles above "
+                "or below it. After each push or pull, compare images to verify that the "
+                "target drawer moved. Disengage and re-localize if another layer moved.\n"
+            )
+    return ""
+
+
 def build_handover_message(
     base_user_message: str,
     *,
@@ -795,19 +828,37 @@ def build_handover_message(
     replay_outcome: Mapping[str, Any],
 ) -> str:
     """Compose a concise in-place continuation message for the slow planner."""
-    failure = replay_outcome.get("failure") or {}
+    trigger = replay_outcome.get("failure") or {}
+    failure = trigger.get("branch_failure") or trigger
     handover_step = replay_outcome.get("handover_step", 0)
     live_anchors = replay_outcome.get("live_anchors") or {}
+    details = replay_outcome.get("live_anchor_details") or {}
     remaining = replay_outcome.get("remaining_plan") or []
     executed = replay_outcome.get("executed_trace") or []
 
-    anchor_lines = (
-        "\n".join(
-            f"  - {phrase}: [{xy[0]:+.4f}, {xy[1]:+.4f}]"
-            for phrase, xy in sorted(live_anchors.items())
+    observed = []
+    for phrase, xy in sorted(live_anchors.items()):
+        line = f"  - {phrase}: xy=[{xy[0]:+.4f}, {xy[1]:+.4f}]"
+        if info := details.get(phrase):
+            if info["z_top"] is not None:
+                line += f" z_top={info['z_top']:.4f}"
+            line += f" ({info['source']}, {info['camera']} step {info['step']})"
+            if info["source"] == "sam3_container_body":
+                line += " Body center only. Verify the opening and interior floor before insertion."
+        observed.append(line)
+    anchor_lines = "\n".join(observed) or "  (none)"
+    if _pre_execution_handoff(replay_outcome):
+        return (
+            base_user_message
+            + "\n\n=== PRE-EXECUTION HANDOFF (NO MOTION EXECUTED YET) ===\n"
+            "The arm has not moved. The scene is still at its initial step 0. Do not reset. "
+            "Start the full task: view_env_state(step=0), identify the objects in agentview_high.png "
+            "and back_project their locations. Use the wrist view to refine uncertain targets. "
+            "Do not call finish while terminated:false before attempting the required grasp "
+            "and placement or articulation. "
+            "Observe termination and respect the episode budget.\n"
+            f"Initial anchor estimates to recheck (meters):\n{anchor_lines}\n"
         )
-        or "  (none)"
-    )
     executed_tail = executed[-5:]
     executed_lines = (
         "\n".join(
@@ -827,27 +878,46 @@ def build_handover_message(
         or "  (plan exhausted)"
     )
 
+    eef = replay_outcome.get("eef_xyz", failure.get("eef_xyz"))
+    geometry = (
+        f"- Current eef_xyz (m): {eef if eef is not None else 'unavailable'}\n"
+        f"- failed_target_xyz (m): {failure.get('failed_target_xyz') or 'unavailable'}\n"
+    )
+    if failure.get("failure_kind") == "motion_stalled":
+        if failure.get("target_attempted") is False:
+            geometry += "The target was rejected by the workspace check before motion. Re-localize and plan a reachable waypoint.\n"
+        else:
+            geometry += (
+                f"{failure.get('failed_action')} ended with a servo residual while approaching "
+                "failed_target_xyz. A workspace edge or cabinet-front OSC IK singularity can "
+                "cause this. Try move_pose with xyz, target_pitch and target_yaw together, "
+                "or use short intermediate waypoints.\n"
+            )
+    geometry += _drawer_warning(
+        replay_outcome.get("task_language") or base_user_message,
+        failure.get("anchor") or "",
+    )
     handover_block = (
         "\n\n=== SYSTEM-1 FLASH HANDOVER (IN-PLACE SINGLE-ATTEMPT RECOVERY) ===\n"
         f"The fast procedural memory ({plan_name}) already executed up to env step "
         f"{handover_step} in this LIVE episode and paused for your recovery.\n"
-        "DO NOT call `reset`. DO NOT re-execute already completed subtasks.\n"
+        "DO NOT call `reset`. Inspect the live state to identify which subtasks actually succeeded.\n"
         f"- Failure kind: {failure.get('failure_kind', 'unknown')}\n"
         f"- Failed plan step: {failure.get('failed_step_idx')} "
         f"({failure.get('failed_action')})\n"
         f"- Detail: {failure.get('detail', 'n/a')}\n"
-        f"- Live localized anchors from Flash:\n{anchor_lines}\n"
+        f"{geometry}"
+        f"- Previously observed anchors (m). Recheck any that may have moved:\n{anchor_lines}\n"
         f"- Recent Flash actions executed:\n{executed_lines}\n"
         f"- Remaining unexecuted Flash plan steps:\n{remaining_lines}\n\n"
         "IMMEDIATE NEXT STEP:\n"
         '1. Call `view_env_state({"step": -1})` to inspect the exact live scene '
         f"(step {handover_step}) and gripper state.\n"
-        "2. Recover in-place from the current physical state to reach "
-        "`terminated == true` (e.g., re-localize shifted objects, adjust pre-grasp "
-        "pose/offset, switch to `move_pose` near IK boundaries, or complete the "
-        "remaining placement/articulation).\n"
-        "3. Keep your recovery sequence clean and concise — if you solve the task, "
-        "your recovery actions will be compiled into procedural memory for future seeds.\n"
+        "2. Do NOT call finish with terminated:false before exhausting applicable physical "
+        "recovery levers within this episode's budget. Re-localize in agentview_high.png via "
+        "back_project. Switch move_to to move_pose near IK walls. For a missed grasp, walk "
+        "the pi0_pick prompt ladder. For drawers or doors, use pi0_doubled or short capped "
+        "pushes and verify progress after contact. Stop on environment termination or truncation.\n"
         "=====================================================================\n"
     )
     return base_user_message + handover_block
@@ -957,6 +1027,7 @@ def run_flash_evolve(
         "evolved_action": "none",
         "branch_attempts": [],
         "fast_actions": 0,
+        "physical_action_calls": 0,
         "slow_result": None,
     }
 
@@ -1013,6 +1084,7 @@ def run_flash_evolve(
         allow_sam3_fallback=True,
     )
     trace_summary["fast_actions"] = int(replay_outcome.get("executed_steps", 0))
+    trace_summary["physical_action_calls"] = replay_outcome["physical_action_calls"]
     trace_summary["anchors"] = int(replay_outcome.get("anchors", 0))
     trace_summary["branch_attempts"] = list(replay_outcome.get("branch_attempts") or [])
     trace_summary["failure"] = replay_outcome.get("failure")
@@ -1050,6 +1122,12 @@ def run_flash_evolve(
 
     # Stage 2: Just-in-Time Slow-System Handover (same live toolkit, NO RESET).
     handover_step = int(replay_outcome.get("handover_step", 0))
+    trace_summary["handoff_type"] = (
+        "pre_execution" if _pre_execution_handoff(replay_outcome) else "in_place"
+    )
+    trace_summary["eef_xyz"] = replay_outcome["eef_xyz"]
+    trace_summary["live_anchors"] = replay_outcome["live_anchors"]
+    trace_summary["live_anchor_details"] = replay_outcome["live_anchor_details"]
     handover_msg = build_handover_message(
         user_message,
         plan_name=plan_name,
