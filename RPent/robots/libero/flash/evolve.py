@@ -15,7 +15,7 @@
 """Fast-Slow procedural memory evolution for LIBERO Flash plans.
 
 System 1 (Flash) executes an anchor-relative procedural plan with zero LLM
-tokens.  When Flash encounters an anomaly (missed grasp, unreachable target, missing
+tokens.  When Flash encounters an anomaly (missed grasp, servo stall, missing
 anchor, primitive error, or an unfinished goal), it first tries any matching
 learned recovery branch at zero LLM cost.  If no learned branch resolves the
 episode, System 2 (a slow LLM planner such as Codex) takes over in-place
@@ -33,7 +33,6 @@ import hashlib
 import json
 import math
 import os
-import re
 import shutil
 import tempfile
 import threading
@@ -355,7 +354,8 @@ def match_recovery_branch(
 _JITTER_TOL_M = 0.015
 
 
-def _xyz(xyz: Any) -> tuple[float, float, float] | None:
+def _cmd_xyz(cmd: Mapping[str, Any]) -> tuple[float, float, float] | None:
+    xyz = cmd.get("xyz")
     if (
         isinstance(xyz, (list, tuple))
         and len(xyz) == 3
@@ -379,7 +379,7 @@ def _redundant_servo_check(previous: Mapping[str, Any], record: StepRecord) -> b
     ):
         return False
 
-    xyz, prior_xyz = _xyz(cmd.get("xyz")), _xyz(previous.get("xyz"))
+    xyz, prior_xyz = _cmd_xyz(cmd), _cmd_xyz(previous)
     if xyz is None or prior_xyz is None:
         return False
     tol = cmd.get("tol", 0.012)
@@ -391,10 +391,7 @@ def _redundant_servo_check(previous: Mapping[str, Any], record: StepRecord) -> b
 
 
 def _reached_same_target(
-    original: Mapping[str, Any],
-    next_record: StepRecord | None,
-    *,
-    pose_retry: bool = False,
+    original: Mapping[str, Any], next_record: StepRecord | None
 ) -> bool:
     """Check for a successful Cartesian replacement with the same gripper and pose constraints."""
     if next_record is None or original["action"] not in MOVE_ACTIONS:
@@ -408,16 +405,16 @@ def _reached_same_target(
         or result.get("interrupted")
     ):
         return False
-    target = _xyz(original.get("xyz"))
-    if target is None or target != _xyz(retry.get("xyz")):
+    target = _cmd_xyz(original)
+    if target is None or target != _cmd_xyz(retry):
         return False
     if original.get("gripper", -1) != retry.get("gripper", -1):
         return False
-    # A pose retry can add rotation to solve the original translation. Never
-    # discard an original command that was also working on a rotation.
+    # A rotation may still be in progress when the translation reaches its target.
+    # Leave orientation-controlled waypoints to the demonstrated sequence.
     if any(
         cmd.get(axis) is not None
-        for cmd in ((original,) if pose_retry else (original, retry))
+        for cmd in (original, retry)
         for axis in ("target_pitch", "target_yaw")
     ):
         return False
@@ -427,30 +424,8 @@ def _reached_same_target(
     )
 
 
-def _stationary_pose_retry(
-    previous: StepRecord | None, record: StepRecord, following: StepRecord | None
-) -> bool:
-    """Recognize a stationary translation immediately replaced by a successful pose servo."""
-    cmd = record.command
-    if (
-        previous is None
-        or cmd["action"] != "move_to"
-        or following is None
-        or following.command["action"] != "move_pose"
-        or not _reached_same_target(cmd, following, pose_retry=True)
-    ):
-        return False
-    before = _xyz((getattr(previous, "state", None) or {}).get("robot0_eef_pos"))
-    after = _xyz((getattr(record, "state", None) or {}).get("robot0_eef_pos"))
-    if before is None or after is None or math.dist(before, after) >= 0.005:
-        return False
-    # The recorded state has no contact sensor. A downward target can seat
-    # the tool on a surface; a closed hand can push even with little EEF travel.
-    return cmd["xyz"][2] >= max(before[2], after[2]) and cmd.get("gripper", -1) == -1
-
-
 def fold_null_events(
-    records: Sequence[StepRecord], *, after_step: int = -1
+    records: Sequence[StepRecord],
 ) -> tuple[list[dict[str, Any]], list[int], int]:
     """Remove failed ordinary grasps and redundant motions before compilation.
 
@@ -462,15 +437,9 @@ def fold_null_events(
         ``(kept_commands, kept_step_indices, folded_count)``.
     """
     raw: list[StepRecord] = []
-    by_step: dict[int, StepRecord] = {}
     for rec in records:
         cmd = rec.command
-        by_step[rec.step_idx] = rec
-        if (
-            rec.step_idx > after_step
-            and isinstance(cmd, dict)
-            and cmd.get("action") in PRIMITIVE_ACTIONS
-        ):
+        if isinstance(cmd, dict) and cmd.get("action") in PRIMITIVE_ACTIONS:
             raw.append(rec)
         if rec.terminated or rec.truncated:
             break
@@ -484,9 +453,7 @@ def fold_null_events(
         following = raw[idx + 1] if idx + 1 < len(raw) else None
         if following is not None and following.step_idx != rec.step_idx + 1:
             following = None
-        if motion_alert(rec) and _stationary_pose_retry(
-            by_step.get(rec.step_idx - 1), rec, following
-        ):
+        if motion_alert(rec) and _reached_same_target(cmd, following):
             continue
         if (
             cmd["action"] == "pi0_pick"
@@ -498,7 +465,6 @@ def fold_null_events(
                 stage1
                 and stage1[-1].step_idx == rec.step_idx - 1
                 and stage1[-1].command.get("gripper", -1) == -1
-                and not motion_alert(stage1[-1])
                 and _reached_same_target(stage1[-1].command, following)
             ):
                 stage1.pop()
@@ -513,10 +479,7 @@ def fold_null_events(
         consecutive = previous_step == rec.step_idx - 1
         previous_step = rec.step_idx
         if not (
-            consecutive
-            and stage2
-            and not motion_alert(rec)
-            and _redundant_servo_check(stage2[-1].command, rec)
+            consecutive and stage2 and _redundant_servo_check(stage2[-1].command, rec)
         ):
             stage2.append(rec)
 
@@ -569,7 +532,7 @@ def compile_recovery_branch(
 ) -> dict[str, Any] | None:
     """Compile post-handover slow-planner recovery steps into a Flash branch."""
     raw_commands, step_indices, folded_nulls = fold_null_events(
-        state.records(), after_step=handover_step
+        [rec for rec in state.records() if rec.step_idx > handover_step]
     )
     if not raw_commands:
         return None
@@ -825,38 +788,6 @@ def compile_new_plan_from_state(
     }
 
 
-def _pre_execution_handoff(outcome: Mapping[str, Any]) -> bool:
-    trigger = outcome.get("failure") or {}
-    if (trigger.get("branch_failure") or trigger).get(
-        "failure_kind"
-    ) != "anchor_missing":
-        return False
-    step = outcome.get("handover_step")
-    if step is not None:
-        # Read-only survey calls can increment executed_steps even at step zero.
-        return step == 0 and not outcome.get("physical_action_calls")
-    return outcome.get("physical_action_calls", outcome.get("fast_actions")) == 0
-
-
-def _drawer_warning(task: str, anchor: str) -> str:
-    pattern = r"\b(top|upper|middle|bottom|lower)\s+(?:layer\s+of\s+(?:the\s+)?)?(?:drawer|cabinet)\b"
-    for text in (task, anchor):
-        levels = {
-            {"upper": "top", "lower": "bottom"}.get(word, word)
-            for word in re.findall(pattern, text.lower())
-        }
-        if len(levels) > 1:
-            return "Verify the drawer level for the current subtask in the live image before pulling.\n"
-        if levels:
-            return (
-                f"🔴 **TARGET DRAWER LEVEL: {levels.pop()}**. Back-project the target handle "
-                "and compare its height with eef_xyz[2] before contact. Avoid handles above "
-                "or below it. After each push or pull, compare images to verify that the "
-                "target drawer moved. Disengage and re-localize if another layer moved.\n"
-            )
-    return ""
-
-
 def build_handover_message(
     base_user_message: str,
     *,
@@ -864,37 +795,19 @@ def build_handover_message(
     replay_outcome: Mapping[str, Any],
 ) -> str:
     """Compose a concise in-place continuation message for the slow planner."""
-    trigger = replay_outcome.get("failure") or {}
-    failure = trigger.get("branch_failure") or trigger
+    failure = replay_outcome.get("failure") or {}
     handover_step = replay_outcome.get("handover_step", 0)
     live_anchors = replay_outcome.get("live_anchors") or {}
-    details = replay_outcome.get("live_anchor_details") or {}
     remaining = replay_outcome.get("remaining_plan") or []
     executed = replay_outcome.get("executed_trace") or []
 
-    observed = []
-    for phrase, xy in sorted(live_anchors.items()):
-        line = f"  - {phrase}: xy=[{xy[0]:+.4f}, {xy[1]:+.4f}]"
-        if info := details.get(phrase):
-            if info["z_top"] is not None:
-                line += f" z_top={info['z_top']:.4f}"
-            line += f" ({info['source']}, {info['camera']} step {info['step']})"
-            if info["source"] == "sam3_container_body":
-                line += " Body center only. Verify the opening and interior floor before insertion."
-        observed.append(line)
-    anchor_lines = "\n".join(observed) or "  (none)"
-    if _pre_execution_handoff(replay_outcome):
-        return (
-            base_user_message
-            + "\n\n=== PRE-EXECUTION HANDOFF (NO MOTION EXECUTED YET) ===\n"
-            "The arm has not moved. The scene is still at its initial step 0. Do not reset. "
-            "Start the full task: view_env_state(step=0), identify the objects in agentview_high.png "
-            "and back_project their locations. Use the wrist view to refine uncertain targets. "
-            "Do not call finish while terminated:false before attempting the required grasp "
-            "and placement or articulation. "
-            "Observe termination and respect the episode budget.\n"
-            f"Initial anchor estimates to recheck (meters):\n{anchor_lines}\n"
+    anchor_lines = (
+        "\n".join(
+            f"  - {phrase}: [{xy[0]:+.4f}, {xy[1]:+.4f}]"
+            for phrase, xy in sorted(live_anchors.items())
         )
+        or "  (none)"
+    )
     executed_tail = executed[-5:]
     executed_lines = (
         "\n".join(
@@ -914,56 +827,27 @@ def build_handover_message(
         or "  (plan exhausted)"
     )
 
-    eef = replay_outcome.get("eef_xyz", failure.get("eef_xyz"))
-    geometry = (
-        f"- Current eef_xyz (m): {eef if eef is not None else 'unavailable'}\n"
-        f"- failed_target_xyz (m): {failure.get('failed_target_xyz') or 'unavailable'}\n"
-    )
-    residuals = [item for item in executed if item.get("servo_residual")]
-    if residuals:
-        last = residuals[-1]
-        origin = f"branch {last['branch_id']} " if last.get("branch_id") else ""
-        geometry += (
-            f"- Servo residuals during replay: {len(residuals)}. Latest: "
-            f"{origin}plan[{last['plan_idx']}] {last['action']}, target_xyz={last['target_xyz']}, "
-            f"eef_xyz={last['eef_xyz']}, final_dist_m={last['final_dist_m']}, tol_m={last['tol_m']}. "
-            "A press or a capped transport hop can end this way. Inspect the current scene for progress.\n"
-        )
-    if failure.get("failure_kind") == "motion_stalled":
-        if failure.get("target_attempted") is False:
-            geometry += "The target was rejected by the workspace check before motion. Re-localize and plan a reachable waypoint.\n"
-        else:
-            geometry += (
-                f"{failure.get('failed_action')} ended with a servo residual while approaching "
-                "failed_target_xyz. A workspace edge or cabinet-front OSC IK singularity can "
-                "cause this. Try move_pose with xyz, target_pitch and target_yaw together, "
-                "or use short intermediate waypoints.\n"
-            )
-    geometry += _drawer_warning(
-        replay_outcome.get("task_language") or base_user_message,
-        failure.get("anchor") or "",
-    )
     handover_block = (
         "\n\n=== SYSTEM-1 FLASH HANDOVER (IN-PLACE SINGLE-ATTEMPT RECOVERY) ===\n"
         f"The fast procedural memory ({plan_name}) already executed up to env step "
         f"{handover_step} in this LIVE episode and paused for your recovery.\n"
-        "DO NOT call `reset`. Inspect the live state to identify which subtasks actually succeeded.\n"
+        "DO NOT call `reset`. DO NOT re-execute already completed subtasks.\n"
         f"- Failure kind: {failure.get('failure_kind', 'unknown')}\n"
         f"- Failed plan step: {failure.get('failed_step_idx')} "
         f"({failure.get('failed_action')})\n"
         f"- Detail: {failure.get('detail', 'n/a')}\n"
-        f"{geometry}"
-        f"- Previously observed anchors (m). Recheck any that may have moved:\n{anchor_lines}\n"
+        f"- Live localized anchors from Flash:\n{anchor_lines}\n"
         f"- Recent Flash actions executed:\n{executed_lines}\n"
         f"- Remaining unexecuted Flash plan steps:\n{remaining_lines}\n\n"
         "IMMEDIATE NEXT STEP:\n"
         '1. Call `view_env_state({"step": -1})` to inspect the exact live scene '
         f"(step {handover_step}) and gripper state.\n"
-        "2. Do NOT call finish with terminated:false before exhausting applicable physical "
-        "recovery levers within this episode's budget. Re-localize in agentview_high.png via "
-        "back_project. If you verify a stationary IK stall, try move_pose. For a missed grasp, walk "
-        "the pi0_pick prompt ladder. For drawers or doors, use pi0_doubled or short capped "
-        "pushes and verify progress after contact. Stop on environment termination or truncation.\n"
+        "2. Recover in-place from the current physical state to reach "
+        "`terminated == true` (e.g., re-localize shifted objects, adjust pre-grasp "
+        "pose/offset, switch to `move_pose` near IK boundaries, or complete the "
+        "remaining placement/articulation).\n"
+        "3. Keep your recovery sequence clean and concise — if you solve the task, "
+        "your recovery actions will be compiled into procedural memory for future seeds.\n"
         "=====================================================================\n"
     )
     return base_user_message + handover_block
@@ -1073,7 +957,6 @@ def run_flash_evolve(
         "evolved_action": "none",
         "branch_attempts": [],
         "fast_actions": 0,
-        "physical_action_calls": 0,
         "slow_result": None,
     }
 
@@ -1130,8 +1013,6 @@ def run_flash_evolve(
         allow_sam3_fallback=True,
     )
     trace_summary["fast_actions"] = int(replay_outcome.get("executed_steps", 0))
-    trace_summary["physical_action_calls"] = replay_outcome["physical_action_calls"]
-    trace_summary["executed_trace"] = replay_outcome.get("executed_trace", [])
     trace_summary["anchors"] = int(replay_outcome.get("anchors", 0))
     trace_summary["branch_attempts"] = list(replay_outcome.get("branch_attempts") or [])
     trace_summary["failure"] = replay_outcome.get("failure")
@@ -1169,12 +1050,6 @@ def run_flash_evolve(
 
     # Stage 2: Just-in-Time Slow-System Handover (same live toolkit, NO RESET).
     handover_step = int(replay_outcome.get("handover_step", 0))
-    trace_summary["handoff_type"] = (
-        "pre_execution" if _pre_execution_handoff(replay_outcome) else "in_place"
-    )
-    trace_summary["eef_xyz"] = replay_outcome["eef_xyz"]
-    trace_summary["live_anchors"] = replay_outcome["live_anchors"]
-    trace_summary["live_anchor_details"] = replay_outcome["live_anchor_details"]
     handover_msg = build_handover_message(
         user_message,
         plan_name=plan_name,

@@ -29,10 +29,8 @@ correct answer.
 from __future__ import annotations
 
 import json
-import math
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +42,6 @@ from robots.libero.flash.prompts import build as prompt_for
 from robots.libero.memory import replay_directory
 from robots.libero.recovery_evidence import motion_alert
 from rpent.robots.components.molmo_client import MolmoClient
-from rpent.robots.components.sam3_client import Sam3Client
 from rpent.session import EnvState
 
 #: ``<family>_<suite>_t<task>_s<seed>``, the tag the CLI builds per cell.
@@ -456,23 +453,14 @@ def replay(
     return {"done": finished(), "anchors": len(live), "plan": len(plan)}
 
 
-def _measured_eef(state: EnvState) -> np.ndarray | None:
+def _eef_xy(state: EnvState) -> list[float] | None:
     record = state.latest_record()
-    pos = (record.state or {}).get("robot0_eef_pos") if record else None
+    if record is None:
+        return None
+    pos = (record.state or {}).get("robot0_eef_pos")
     if isinstance(pos, (list, tuple, np.ndarray)) and len(pos) >= 2:
-        observed = np.asarray(pos[:3], dtype=float)
-        if np.isfinite(observed[:2]).all():
-            return observed if np.isfinite(observed).all() else observed[:2]
+        return [round(float(pos[0]), 4), round(float(pos[1]), 4)]
     return None
-
-
-def _eef_snapshot(state: EnvState) -> dict[str, list[float] | None]:
-    """Keep a measured xy when an older observation has no height."""
-    eef = _measured_eef(state)
-    return {
-        "eef_xy": eef[:2].round(4).tolist() if eef is not None else None,
-        "eef_xyz": eef.round(4).tolist() if eef is not None and len(eef) == 3 else None,
-    }
 
 
 def _episode_ended(toolkit: Any) -> bool:
@@ -480,23 +468,14 @@ def _episode_ended(toolkit: Any) -> bool:
     return bool(toolkit.solved() or (record is not None and record.truncated))
 
 
-@dataclass
-class _LiveAnchor:
-    xy: np.ndarray
-    z_top: float | None
-    camera: str
-    step: int
-    source: str
-
-
-def _segment_anchor(
+def _segment_xy(
     call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
     phrase: str,
     camera: str,
     step: int,
     min_score: float,
     note: Callable[[str], None],
-) -> _LiveAnchor | None:
+) -> np.ndarray | None:
     try:
         found = call_tool(
             "segment",
@@ -506,204 +485,10 @@ def _segment_anchor(
         note(f"      {phrase[:26]!r} segmentation failed: {exc}")
         return None
     world = found.get("world_xyz")
-    if found.get("found", True) and isinstance(world, list) and len(world) >= 2:
+    if isinstance(world, list) and len(world) >= 2:
         xy = np.asarray(world[:2], dtype=float)
-        if np.isfinite(xy).all():
-            return _LiveAnchor(xy, found.get("z_top"), camera, step, "segment")
-    return None
-
-
-def _collective_subject(phrase: str) -> bool:
-    """Test the subject noun, so a cabinet with multiple drawers is still singular."""
-    head = re.split(
-        r"\b(?:with|on|of|in|from|between|next|at)\b", phrase.casefold(), maxsplit=1
-    )[0].strip()
-    return bool(
-        re.match(
-            r"^(?:the )?(?:both|two|three|all|several|multiple|(?:a )?pair)\b", head
-        )
-        or (head.endswith("s") and not head.endswith(("ss", "us", "is")))
-    )
-
-
-_DIRECTION_AXIS = {
-    "left": (1, 1),
-    "right": (1, -1),
-    "front": (0, -1),
-    "closer": (0, -1),
-    "back": (0, 1),
-    "rear": (0, 1),
-    "farther": (0, 1),
-}
-_DIRECTIONS = "|".join(_DIRECTION_AXIS)
-_CAVITY = re.compile(
-    r"(?:open )?(?:inside|interior) of "
-    r"((?:[\w-]+ )*(?:microwave|basket|bowl))"
-)
-_FALLBACK_MIN_SCORE = 0.5
-_INSTANCE_GAP_M = 0.04
-
-
-def _grounding_query(phrase: str) -> tuple[str, str] | None:
-    """Decompose only a directional instance or a named container interior."""
-    label = " ".join(phrase.lower().split()).removeprefix("the ")
-    cavity = _CAVITY.fullmatch(label)
-    prefix = re.fullmatch(rf"({_DIRECTIONS}) ([\w -]+)", label)
-    suffix = re.fullmatch(
-        rf"([\w -]+) (?:on|at|in) the (?:far )?({_DIRECTIONS})", label
-    )
-    if cavity:
-        direction, noun = "interior", cavity[1]
-    elif prefix:
-        direction, noun = prefix.groups()
-    elif suffix:
-        noun, direction = suffix.groups()
-    else:
-        return None
-    # A relation to another object needs a separate landmark.
-    if re.search(
-        r"\b(of|on|at|in|next|between|behind|with)\b", noun
-    ) or _collective_subject(noun):
-        return None
-    return direction, noun
-
-
-def _sam3_candidate(
-    client: Sam3Client, image: np.ndarray, world: np.ndarray, noun: str
-) -> tuple[np.ndarray, np.ndarray] | None:
-    result = client.segment(image, text_prompt=noun, min_score=_FALLBACK_MIN_SCORE)
-    mask = result.mask
-    if not (
-        result.found
-        and result.score is not None
-        and _FALLBACK_MIN_SCORE <= result.score <= 1
-        and mask is not None
-        and mask.dtype == bool
-        and mask.shape == image.shape[:2]
-    ):
-        return None
-    points = libero_tools._valid_mask_points(mask, world)
-    if len(points) < max(10, int(mask.sum()) * 0.6):
-        return None
-    return mask, points
-
-
-def _container_center(mask: np.ndarray, xy: np.ndarray) -> np.ndarray | None:
-    """Require visible support around the center on both horizontal axes."""
-    if len(xy) < 32 or mask[[0, -1], :].any() or mask[:, [0, -1]].any():
-        return None
-    lo, hi = np.percentile(xy, [10, 90], axis=0)
-    span = hi - lo
-    center = (hi + lo) / 2
-    if np.any(span < 0.02) or np.any(
-        np.abs(np.median(xy, axis=0) - center) > span * 0.25
-    ):
-        return None
-    # Reject an oblique facade, a rim fragment or one wall with a few outliers.
-    side = xy > center
-    quadrants = side[:, 0].astype(int) * 2 + side[:, 1]
-    if np.min(np.bincount(quadrants, minlength=4)) < 0.05 * len(xy):
-        return None
-    return center
-
-
-def _geometric_anchor(
-    state: EnvState,
-    client: Sam3Client,
-    phrase: str,
-    step: int,
-    note: Callable[[str], None],
-) -> _LiveAnchor | None:
-    query = _grounding_query(phrase)
-    if query is None:
-        return None
-    relation, noun = query
-    try:
-        image = state.load("agentview_high.png", step=step)
-        world = state.load("agentview_world_high.npz", step=step)
-        if image.ndim != 3 or image.shape[2] != 3 or world.shape != image.shape:
-            return None
-        first = _sam3_candidate(client, image, world, noun)
-        if first is None:
-            note(
-                f"      {phrase!r}: no reliable RGB-D mask for {noun!r} at score >= {_FALLBACK_MIN_SCORE}"
-            )
-            return None
-        mask, points = first
-        if relation == "interior":
-            xy = _container_center(mask, points[:, :2])
-            if xy is None:
-                note(
-                    f"      {phrase!r}: visible {noun!r} mask does not support a body center"
-                )
-                return None
-            source = "sam3_container_body"
-        else:
-            rows, cols = np.nonzero(mask)
-            box = np.s_[rows.min() : rows.max() + 1, cols.min() : cols.max() + 1]
-            masked = image.copy()
-            masked[box] = image.mean(axis=(0, 1))
-            second = _sam3_candidate(client, masked, world, noun)
-            if second is None or second[0][box].any():
-                note(
-                    f"      {phrase!r}: no independent second {noun!r} mask after occlusion"
-                )
-                return None
-            first_xy = np.median(points[:, :2], axis=0)
-            second_xy = np.median(second[1][:, :2], axis=0)
-            if np.max(np.abs([first_xy, second_xy])) > REACH:
-                return None
-            axis, sign = _DIRECTION_AXIS[relation]
-            gap = sign * (first_xy[axis] - second_xy[axis])
-            if round(abs(float(gap)), 4) <= _INSTANCE_GAP_M:
-                note(
-                    f"      {phrase!r}: candidates are too close along the {relation} axis"
-                )
-                return None
-            xy = first_xy
-            if gap < 0:
-                xy, points = second_xy, second[1]
-            source = "sam3_directional_pair"
-    except (OSError, KeyError, ValueError, RuntimeError) as exc:
-        note(f"      {phrase!r} SAM3 geometry unavailable: {exc}")
-        return None
-    if np.max(np.abs(xy)) > REACH:
-        return None
-    note(
-        f"      {phrase!r} localized via {source} from {noun!r} at agentview step {step}"
-    )
-    return _LiveAnchor(
-        xy, float(np.percentile(points[:, 2], 95)), "agentview", step, source
-    )
-
-
-def _locate_with_sam3(
-    toolkit: Any,
-    call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
-    phrase: str,
-    cameras: tuple[str, ...],
-    step: int,
-    min_score: float,
-    note: Callable[[str], None],
-    *,
-    geometric_fallback: bool,
-) -> _LiveAnchor | None:
-    if _collective_subject(phrase):
-        note(
-            f"      {phrase!r} denotes multiple instances and needs separate localization"
-        )
-        return None
-    found_outside_workspace = False
-    for camera in cameras:
-        anchor = _segment_anchor(call_tool, phrase, camera, step, min_score, note)
-        if anchor is not None:
-            if np.max(np.abs(anchor.xy)) <= REACH:
-                return anchor
-            found_outside_workspace = True
-    if geometric_fallback and not found_outside_workspace:
-        client = getattr(getattr(toolkit, "primitives", None), "sam3_client", None)
-        if client is not None:
-            return _geometric_anchor(toolkit.state, client, phrase, step, note)
+        if np.isfinite(xy).all() and np.max(np.abs(xy)) <= REACH:
+            return xy
     return None
 
 
@@ -719,57 +504,43 @@ def _survey_live_anchors(
     note: Callable[[str], None],
     allow_sam3_fallback: bool,
     call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
-) -> dict[str, _LiveAnchor]:
+) -> dict[str, np.ndarray]:
     """Localize plan anchors via Molmo+SAM3, or SAM3-only when Molmo is absent."""
     state = toolkit.state
-    live: dict[str, _LiveAnchor] = {}
-    geometric_fallback = molmo is None and allow_sam3_fallback
+    live: dict[str, np.ndarray] = {}
     for phrase in reference:
         if _episode_ended(toolkit):
             break
-        use_segment = locator_of.get(phrase) == "segment" or geometric_fallback
-        anchor = None
+        use_segment = locator_of.get(phrase) == "segment" or (
+            molmo is None and allow_sam3_fallback
+        )
+        xy = None
         if use_segment:
             camera = camera_of.get(phrase, "agentview")
             min_score = 0.15 if molmo is None else 0.2
+            xy = _segment_xy(call_tool, phrase, camera, opening, min_score, note)
             # A wrist observation can come from a later pose in the teaching
             # episode. The fixed camera can still see the object at reset.
-            cameras = ("wrist", "agentview") if camera == "wrist" else (camera,)
-            anchor = _locate_with_sam3(
-                toolkit,
-                call_tool,
-                phrase,
-                cameras,
-                opening,
-                min_score,
-                note,
-                geometric_fallback=geometric_fallback,
-            )
+            if xy is None and camera == "wrist":
+                xy = _segment_xy(
+                    call_tool, phrase, "agentview", opening, min_score, note
+                )
         elif molmo is not None:
             try:
                 got = locate(
                     molmo, state, opening, "agentview", prompt_for("survey", phrase)
                 )
-                if got:
-                    anchor = _LiveAnchor(
-                        got["xy"], got.get("z_top"), "agentview", opening, "molmo"
-                    )
+                xy = got["xy"] if got else None
             except (RuntimeError, OSError, ValueError) as exc:
                 note(f"      {phrase[:26]!r} point grounding failed: {exc}")
-        if (
-            anchor is None
-            or not np.isfinite(anchor.xy).all()
-            or np.max(np.abs(anchor.xy)) > REACH
-        ):
+        if xy is None or not np.isfinite(xy).all() or np.max(np.abs(xy)) > REACH:
             note(f"      {phrase[:26]!r} not located, or out of reach")
             continue
-        live[phrase] = anchor
+        live[phrase] = xy
 
     note(
         "    survey "
-        + "  ".join(
-            f"{p[:18]}=({a.xy[0]:+.3f},{a.xy[1]:+.3f})" for p, a in live.items()
-        )
+        + "  ".join(f"{p[:18]}=({a[0]:+.3f},{a[1]:+.3f})" for p, a in live.items())
     )
 
     if molmo is None:
@@ -789,35 +560,20 @@ def _survey_live_anchors(
         if locator_of.get(phrase) == "segment":
             continue
         try:
-            eef = _measured_eef(state)
-            if eef is None:
-                raise ValueError("Missing measured EEF position for the wrist approach")
-            distance = np.linalg.norm(coarse.xy - eef[:2])
-            # Even segment counts visit the midpoint; very wide traversals
-            # also split each half to keep it within the OSC travel limit.
-            hops = 1 if distance <= 0.28 else 2 * math.ceil(distance / (2 * 0.28))
-            waypoints = np.linspace(eef[:2], coarse.xy, hops + 1)[1:]
-            for xy in waypoints:
-                position = _measured_eef(state)
-                if (
-                    position is None
-                    or np.linalg.norm(xy.round(4) - position[:2]) > 0.30
-                ):
-                    raise ValueError(
-                        "Next wrist waypoint exceeds 0.30 m from the measured EEF"
-                    )
-                call_tool(
-                    "move_to",
-                    {
-                        "xyz": [*xy.round(4).tolist(), float(hover)],
-                        "gripper": -1,
-                        "step_clip": 0.02,
-                        "max_steps": 150,
-                        "tol": 0.012,
-                    },
-                )
-                if _episode_ended(toolkit):
-                    break
+            call_tool(
+                "move_to",
+                {
+                    "xyz": [
+                        round(float(coarse[0]), 4),
+                        round(float(coarse[1]), 4),
+                        float(hover),
+                    ],
+                    "gripper": -1,
+                    "step_clip": 0.02,
+                    "max_steps": 150,
+                    "tol": 0.012,
+                },
+            )
             if _episode_ended(toolkit):
                 break
             close = locate(
@@ -828,14 +584,12 @@ def _survey_live_anchors(
             continue
         if close is None:
             continue
-        gap = float(np.linalg.norm(close["xy"] - coarse.xy))
+        gap = float(np.linalg.norm(close["xy"] - coarse))
         if not np.isfinite(gap) or gap > REFINE_ACCEPT:
             note(f"      {phrase[:20]!r} close reading {gap:.3f} away, rejected")
             continue
         note(f"      {phrase[:20]!r} refined by {gap:.3f}")
-        live[phrase] = _LiveAnchor(
-            close["xy"], close.get("z_top"), "wrist", state.latest_step, "molmo"
-        )
+        live[phrase] = close["xy"]
     return live
 
 
@@ -843,7 +597,7 @@ def _run_anchored_sequence(
     toolkit: Any,
     molmo: MolmoClient | None,
     actions: list[dict[str, Any]],
-    live: dict[str, _LiveAnchor],
+    live: dict[str, np.ndarray],
     *,
     note: Callable[[str], None],
     call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
@@ -858,27 +612,16 @@ def _run_anchored_sequence(
     failure: dict[str, Any] | None = None
     last_anchor: str | None = None
 
-    def fail(
-        idx: int,
-        name: str,
-        anchor: str | None,
-        kind: str,
-        detail: str,
-        target_xyz: list[float] | None = None,
-        *,
-        target_attempted: bool = True,
-    ) -> None:
+    def fail(idx: int, name: str, anchor: str | None, kind: str, detail: str) -> None:
         nonlocal failure
-        located = live.get(anchor)
+        xy = live.get(anchor) if anchor is not None else None
         failure = {
             "failure_kind": kind,
             "failed_step_idx": idx,
             "failed_action": name,
             "anchor": anchor,
-            "anchor_xy": located.xy.round(4).tolist() if located else None,
-            **_eef_snapshot(state),
-            "failed_target_xyz": target_xyz,
-            "target_attempted": target_attempted if target_xyz is not None else None,
+            "anchor_xy": xy.round(4).tolist() if xy is not None else None,
+            "eef_xy": _eef_xy(state),
             "detail": detail,
         }
 
@@ -896,7 +639,7 @@ def _run_anchored_sequence(
             raw = call_tool(name, args)
         except RuntimeError as exc:
             entry["status"] = "error"
-            fail(idx, name, anchor, "action_error", str(exc), args.get("xyz"))
+            fail(idx, name, anchor, "action_error", str(exc))
             return {}
         record = state.latest_record()
         if (
@@ -904,12 +647,13 @@ def _run_anchored_sequence(
             and record is not None
             and motion_alert(record)
         ):
-            entry.update(
-                servo_residual=True,
-                target_xyz=args["xyz"],
-                eef_xyz=_eef_snapshot(state)["eef_xyz"],
-                final_dist_m=record.result["final_dist_m"],
-                tol_m=record.command.get("tol", 0.012),
+            entry["status"] = "motion_stalled"
+            fail(
+                idx,
+                name,
+                anchor,
+                "motion_stalled",
+                f"{name} stalled with servo residual exceeding tolerance",
             )
         elif check_grasp and not pick_succeeded(raw):
             entry["status"] = "pick_failed"
@@ -948,28 +692,23 @@ def _run_anchored_sequence(
                         f"attached anchor {phrase!r} could not be localized",
                     )
                     break
-                target = live[phrase].xy + np.array(entry["offset"])
+                target = live[phrase] + np.array(entry["offset"])
             if not recorded_commands and args.get("gripper", -1) == 1:
                 target = target - offset
-            args["xyz"] = [
-                round(float(target[0]), 4),
-                round(float(target[1]), 4),
-                float(xyz[2]),
-            ]
-            if not np.isfinite(args["xyz"]).all():
-                fail(idx, name, last_anchor, "action_error", "non-finite waypoint")
-                break
-            if np.max(np.abs(target)) > REACH:
+            if not np.isfinite(target).all() or np.max(np.abs(target)) > REACH:
                 fail(
                     idx,
                     name,
                     last_anchor,
                     "motion_stalled",
                     f"target xy {target.tolist()} exceeds reachable workspace {REACH}",
-                    args["xyz"],
-                    target_attempted=False,
                 )
                 break
+            args["xyz"] = [
+                round(float(target[0]), 4),
+                round(float(target[1]), 4),
+                float(xyz[2]),
+            ]
         elif name in {"pi0_pick", "pi0_doubled"}:
             prompt = str(args.get("prompt", ""))
             stripped = re.sub(r"^(pick up|grasp)\s+the\s+", "", prompt, flags=re.I)
@@ -1016,9 +755,9 @@ def _run_anchored_sequence(
                 except (RuntimeError, OSError, ValueError) as exc:
                     note(f"      held object grounding failed: {exc}")
                     body = None
-                eef_xy = _eef_snapshot(state)["eef_xy"]
-                if body is not None and eef_xy is not None:
-                    candidate = body["xy"] - eef_xy
+                eef = _eef_xy(state)
+                if body is not None and eef is not None:
+                    candidate = body["xy"] - eef
                     if np.linalg.norm(candidate) <= MAX_HELD:
                         offset = candidate
                         note(f"      held offset ({offset[0]:+.4f},{offset[1]:+.4f})")
@@ -1057,13 +796,10 @@ def replay_with_evolution(
         raise RuntimeError("Flash Mode replay requires an initialized environment")
 
     tool_calls = 0
-    primitive_calls = 0
 
     def call_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
-        nonlocal tool_calls, primitive_calls
+        nonlocal tool_calls
         tool_calls += 1
-        if libero_tools._is_primitive_action(name):
-            primitive_calls += 1
         return execute(toolkit, name, args)
 
     live = _survey_live_anchors(
@@ -1093,15 +829,14 @@ def replay_with_evolution(
     failure = main_run["failure"]
     if failure is None and not _episode_ended(toolkit):
         last_anchor = main_run["last_anchor"]
-        located = live.get(last_anchor)
+        xy = live.get(last_anchor)
         failure = {
             "failure_kind": "plan_incomplete",
             "failed_step_idx": len(plan),
             "failed_action": plan[-1]["action"] if plan else None,
             "anchor": last_anchor,
-            "anchor_xy": located.xy.round(4).tolist() if located else None,
-            **_eef_snapshot(state),
-            "failed_target_xyz": None,
+            "anchor_xy": xy.round(4).tolist() if xy is not None else None,
+            "eef_xy": _eef_xy(state),
             "detail": "Flash plan finished all steps but environment did not terminate",
         }
 
@@ -1119,20 +854,18 @@ def replay_with_evolution(
             calls_before_branch = tool_calls
             for anchor in branch.get("anchors", ()):
                 phrase = anchor["phrase"]
-                located = _locate_with_sam3(
-                    toolkit,
+                xy = _segment_xy(
                     call_tool,
                     phrase,
-                    (anchor.get("camera", "agentview"),),
+                    anchor.get("camera", "agentview"),
                     failure_step,
                     0.2,
                     note,
-                    geometric_fallback=molmo is None and allow_sam3_fallback,
                 )
-                if located is None:
+                if xy is None:
                     live.pop(phrase, None)
                 else:
-                    live[phrase] = located
+                    live[phrase] = xy
             branch_run = _run_anchored_sequence(
                 toolkit,
                 molmo,
@@ -1156,7 +889,6 @@ def replay_with_evolution(
             )
             if branch_run["failure"] is not None:
                 failure["branch_failure_detail"] = branch_run["failure"]["detail"]
-                failure["branch_failure"] = branch_run["failure"]
 
     done = bool(toolkit.solved())
     if done:
@@ -1175,21 +907,9 @@ def replay_with_evolution(
         "done": done,
         "mode": mode,
         "anchors": len(live),
-        "live_anchors": {p: a.xy.round(4).tolist() for p, a in live.items()},
-        "live_anchor_details": {
-            p: {
-                "z_top": a.z_top,
-                "source": a.source,
-                "camera": a.camera,
-                "step": a.step,
-            }
-            for p, a in live.items()
-        },
+        "live_anchors": {phrase: xy.round(4).tolist() for phrase, xy in live.items()},
         "plan": len(plan),
         "executed_steps": tool_calls,
-        "physical_action_calls": primitive_calls,
-        "eef_xyz": _eef_snapshot(state)["eef_xyz"],
-        "task_language": state.get(opening).extras.get("task_language"),
         "handover_step": state.latest_step,
         "failure_step": failure_step,
         "failure": failure,

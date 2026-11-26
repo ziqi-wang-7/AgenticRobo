@@ -82,11 +82,6 @@ class LiberoPrimitives:
         self._flywheel_config = flywheel_config
         self._flywheel = None
 
-    @property
-    def sam3_client(self) -> Sam3Client:
-        """Image-only segmenter used by Flash to query a masked copy of a frame."""
-        return self._sam3_client
-
     def start_recording(self):
         self._recording = True
         self._frames = []
@@ -940,8 +935,6 @@ class LiberoPrimitives:
             "world_xyz": segment_blob["world_xyz"],
             "world_error": segment_blob.get("world_error"),
         }
-        if "z_top" in world_result:
-            result["z_top"] = world_result["z_top"]
         if saved_segment is None:
             result["error"] = f"failed to persist segment artifact {segment_name}"
             result["code"] = "segment_artifact_save_failed"
@@ -1373,13 +1366,6 @@ def _select_segment_artifacts(
     return None, None, pairs
 
 
-def _valid_mask_points(mask: np.ndarray, world_map: np.ndarray) -> np.ndarray:
-    """Finite, nonzero RGB-D projections for a mask aligned to this frame."""
-    pts = world_map[mask.astype(bool, copy=False)]
-    valid = np.isfinite(pts).all(axis=1) & (np.abs(pts).sum(axis=1) > 1e-6)
-    return pts[valid, :3]
-
-
 def _mask_to_world(
     mask: np.ndarray, world_map: np.ndarray, min_valid: int = 10
 ) -> dict:
@@ -1408,7 +1394,9 @@ def _mask_to_world(
     if ys.size == 0:
         return {"world_xyz": None, "world_error": "empty mask"}
 
-    pts = _valid_mask_points(mask, world_map).astype(np.float64, copy=False)
+    pts = world_map[ys, xs].astype(np.float64)
+    valid = np.isfinite(pts).all(axis=1) & (np.abs(pts).sum(axis=1) > 1e-6)
+    pts = pts[valid]
     result = {
         "centroid_pixel": [
             int(round(float(np.median(xs)))),
@@ -1432,8 +1420,6 @@ def _mask_to_world(
         round(float(np.median(pts[:, 1])), 4),
         round(float(np.median(pts[:, 2])), 4),
     ]
-    # Estimate the visible upper surface without isolated depth spikes.
-    result["z_top"] = round(float(np.percentile(pts[:, 2], 95)), 4)
     return result
 
 
