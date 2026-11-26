@@ -499,13 +499,12 @@ def _survey_live_anchors(
     reference: dict[str, np.ndarray],
     locator_of: dict[str, str],
     camera_of: dict[str, str],
-    plan: list[dict[str, Any]],
     opening: int,
     note: Callable[[str], None],
     allow_sam3_fallback: bool,
     call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
 ) -> dict[str, np.ndarray]:
-    """Localize plan anchors via Molmo+SAM3, or SAM3-only when Molmo is absent."""
+    """Localize anchors from the recorded opening frame without moving the robot."""
     state = toolkit.state
     live: dict[str, np.ndarray] = {}
     for phrase in reference:
@@ -543,9 +542,20 @@ def _survey_live_anchors(
         + "  ".join(f"{p[:18]}=({a[0]:+.3f},{a[1]:+.3f})" for p, a in live.items())
     )
 
-    if molmo is None:
-        return live
+    return live
 
+
+def _refine_live_anchors(
+    toolkit: Any,
+    molmo: MolmoClient,
+    live: dict[str, np.ndarray],
+    locator_of: dict[str, str],
+    plan: list[dict[str, Any]],
+    note: Callable[[str], None],
+    call_tool: Callable[[str, dict[str, Any]], dict[str, Any]],
+) -> None:
+    """Refine point-grounded anchors from the wrist after the plan passes preflight."""
+    state = toolkit.state
     hover = max(
         (
             s["arguments"]["xyz"][2]
@@ -590,7 +600,44 @@ def _survey_live_anchors(
             continue
         note(f"      {phrase[:20]!r} refined by {gap:.3f}")
         live[phrase] = close["xy"]
-    return live
+
+
+def _attached_anchor(entry: dict[str, Any]) -> str | None:
+    phrase = entry.get("anchor")
+    if (
+        entry["action"] in {"move_to", "move_pose"}
+        and phrase is not None
+        and entry.get("anchor_distance", 9) <= MAX_ATTACH
+    ):
+        return phrase
+    return None
+
+
+def _missing_plan_anchors(
+    plan: list[dict[str, Any]], live: dict[str, np.ndarray], state: EnvState
+) -> list[dict[str, Any]]:
+    """Build step-zero recovery triggers for unresolved attached moves in plan order."""
+    missing = []
+    for idx, entry in enumerate(plan):
+        phrase = _attached_anchor(entry)
+        if phrase is None or phrase in live:
+            continue
+        missing.append(
+            {
+                "failure_kind": "anchor_missing",
+                "failed_step_idx": 0,
+                "missing_plan_idx": idx,
+                "failed_action": entry["action"],
+                "anchor": phrase,
+                "anchor_xy": None,
+                "eef_xy": _eef_xy(state),
+                "detail": (
+                    f"Opening survey: anchor {phrase!r} required by plan[{idx}] was not localized. "
+                    "Flash executed zero main plan actions."
+                ),
+            }
+        )
+    return missing
 
 
 def _run_anchored_sequence(
@@ -682,7 +729,7 @@ def _run_anchored_sequence(
                 )
                 break
             target = np.array(xyz[:2], dtype=float)
-            if phrase is not None and entry.get("anchor_distance", 9) <= MAX_ATTACH:
+            if _attached_anchor(entry) is not None:
                 if phrase not in live:
                     fail(
                         idx,
@@ -808,41 +855,54 @@ def replay_with_evolution(
         reference=program["reference"],
         locator_of=program["locator_of"],
         camera_of=program.get("camera_of", {}),
-        plan=plan,
         opening=opening,
         note=note,
         allow_sam3_fallback=allow_sam3_fallback,
         call_tool=call_tool,
     )
-    main_run = _run_anchored_sequence(
-        toolkit,
-        molmo,
-        plan,
-        live,
-        note=note,
-        call_tool=call_tool,
-        recorded_commands=(program.get("source") or {}).get("compiled_by")
-        == "flash_evolve_cold_start",
+    missing = (
+        [] if _episode_ended(toolkit) else _missing_plan_anchors(plan, live, state)
     )
-    trace = main_run["executed_trace"]
-    failure_step = state.latest_step
-    failure = main_run["failure"]
-    if failure is None and not _episode_ended(toolkit):
-        last_anchor = main_run["last_anchor"]
-        xy = live.get(last_anchor)
-        failure = {
-            "failure_kind": "plan_incomplete",
-            "failed_step_idx": len(plan),
-            "failed_action": plan[-1]["action"] if plan else None,
-            "anchor": last_anchor,
-            "anchor_xy": xy.round(4).tolist() if xy is not None else None,
-            "eef_xy": _eef_xy(state),
-            "detail": "Flash plan finished all steps but environment did not terminate",
-        }
+    if missing:
+        failure, trace = missing[0], []
+        note(f"    anchor preflight: {failure['detail']}")
+    else:
+        if molmo is not None:
+            _refine_live_anchors(
+                toolkit, molmo, live, program["locator_of"], plan, note, call_tool
+            )
+        main_run = _run_anchored_sequence(
+            toolkit,
+            molmo,
+            plan,
+            live,
+            note=note,
+            call_tool=call_tool,
+            recorded_commands=(program.get("source") or {}).get("compiled_by")
+            == "flash_evolve_cold_start",
+        )
+        failure, trace = main_run["failure"], main_run["executed_trace"]
+        if failure is None and not _episode_ended(toolkit):
+            last_anchor = main_run["last_anchor"]
+            xy = live.get(last_anchor)
+            failure = {
+                "failure_kind": "plan_incomplete",
+                "failed_step_idx": len(plan),
+                "failed_action": plan[-1]["action"] if plan else None,
+                "anchor": last_anchor,
+                "anchor_xy": xy.round(4).tolist() if xy is not None else None,
+                "eef_xy": _eef_xy(state),
+                "detail": "Flash plan finished all steps but environment did not terminate",
+            }
 
+    failure_step = state.latest_step
     branch_attempts: list[dict[str, Any]] = []
     if failure and not _episode_ended(toolkit) and branch_matcher is not None:
-        branch = branch_matcher(program, failure, tried_ids=set())
+        for candidate in missing or [failure]:
+            branch = branch_matcher(program, candidate, tried_ids=set())
+            if branch is not None:
+                failure = candidate
+                break
         if branch is not None:
             branch_id = str(branch["branch_id"])
             note(
@@ -909,7 +969,8 @@ def replay_with_evolution(
         "anchors": len(live),
         "live_anchors": {phrase: xy.round(4).tolist() for phrase, xy in live.items()},
         "plan": len(plan),
-        "executed_steps": tool_calls,
+        # Step-0 segmentation reads are recorded by the toolkit but never moved the arm.
+        "executed_steps": 0 if missing and not branch_attempts else tool_calls,
         "handover_step": state.latest_step,
         "failure_step": failure_step,
         "failure": failure,

@@ -199,6 +199,139 @@ def test_pick_retry_stops_at_the_first_error_or_terminal_step(
         )
 
 
+def _anchor_plan_step(action, phrase, distance=0.02):
+    return {
+        "action": action,
+        "arguments": {"xyz": [0.1, 0.0, 0.7]},
+        "anchor": phrase,
+        "anchor_distance": distance,
+        "offset": [0, 0],
+    }
+
+
+@pytest.mark.parametrize("missing_action", ["move_to", "move_pose"])
+@pytest.mark.parametrize("point_grounder", [False, True])
+def test_anchor_preflight_hands_over_untouched_for_a_later_missing_anchor(
+    tmp_path, monkeypatch, missing_action, point_grounder
+):
+    import numpy as np
+
+    from robots.libero.flash import replay
+
+    tk = FakeLiberoToolkit(
+        tmp_path, memory_root=tmp_path, anchors_xyz={"bowl": [0.16, 0, 0.5]}
+    )
+    calls = []
+
+    def locate(molmo, state, step, camera, query):
+        calls.append((step, camera))
+        return {"xy": np.array([0.16, 0.0])}
+
+    monkeypatch.setattr(replay, "locate", locate)
+    plan = [
+        _anchor_plan_step("move_to", "bowl"),
+        {"action": "pi0_pick", "arguments": {"prompt": "pick up the bowl"}},
+        _anchor_plan_step(missing_action, "shelf", replay.MAX_ATTACH),
+    ]
+    program = {
+        "plan": plan,
+        "reference": {"bowl": [0, 0], "shelf": [0, 0]},
+        "locator_of": {
+            "bowl": "point" if point_grounder else "segment",
+            "shelf": "segment",
+        },
+    }
+    out = replay.replay_with_evolution(
+        tk, object() if point_grounder else None, program
+    )
+    assert out["mode"] == "needs_handover" and not out["done"]
+    assert (
+        out["executed_steps"]
+        == out["failure_step"]
+        == out["handover_step"]
+        == tk.state.latest_step
+        == 0
+    )
+    assert out["executed_trace"] == out["branch_attempts"] == []
+    assert out["live_anchors"] == {"bowl": [0.16, 0.0]}
+    assert [item["plan_idx"] for item in out["remaining_plan"]] == [0, 1, 2]
+    failure = out["failure"]
+    assert (
+        failure["failure_kind"],
+        failure["failed_step_idx"],
+        failure["anchor"],
+        failure["missing_plan_idx"],
+    ) == ("anchor_missing", 0, "shelf", 2)
+    assert all(name == "segment" and args["step"] == 0 for name, args in tk.executed)
+    assert calls == ([(0, "agentview")] if point_grounder else [])
+
+
+@pytest.mark.parametrize("trigger_step", [0, 2])
+def test_anchor_preflight_selects_only_recovery_applicable_at_opening(
+    tmp_path, trigger_step
+):
+    from robots.libero.flash.replay import replay_with_evolution
+
+    tk = FakeLiberoToolkit(tmp_path, memory_root=tmp_path, anchors_xyz={})
+    branch = {
+        "branch_id": "shelf-rescue",
+        "trigger": {
+            "failure_kind": "anchor_missing",
+            "failed_step_idx": trigger_step,
+            "failed_action": "move_pose",
+            "anchor": "shelf",
+        },
+        "actions": [
+            {"action": "pi0_pick", "arguments": {"prompt": "rescue grasp"}},
+            {"action": "release", "arguments": {}},
+        ],
+    }
+    program = {
+        "reference": {},
+        "locator_of": {},
+        "recovery_branches": [branch],
+        "plan": [
+            {"action": "set_gripper", "arguments": {"gripper": 1}},
+            _anchor_plan_step("move_to", "rim"),
+            _anchor_plan_step("move_pose", "shelf"),
+        ],
+    }
+    out = replay_with_evolution(tk, None, program, branch_matcher=match_recovery_branch)
+    if trigger_step == 0:
+        assert out["mode"] == "flash_branch" and out["done"]
+        assert out["failure_step"] == 0 and out["failure"]["anchor"] == "shelf"
+        assert [name for name, _ in tk.executed] == ["pi0_pick", "release"]
+    else:
+        assert out["mode"] == "needs_handover" and out["failure"]["anchor"] == "rim"
+        assert out["executed_steps"] == 0 and tk.executed == []
+
+
+def test_anchor_preflight_ignores_nonmoves_and_unattached_waypoints(tmp_path):
+    from robots.libero.flash.replay import MAX_ATTACH, replay_with_evolution
+
+    tk = FakeLiberoToolkit(tmp_path, memory_root=tmp_path, anchors_xyz={})
+    plan = [
+        _anchor_plan_step("move_to", "distant", MAX_ATTACH + 0.01),
+        {
+            "action": "move_pose",
+            "anchor": "unattached",
+            "arguments": {"xyz": [0.1, 0, 0.7]},
+        },
+        {
+            "action": "pi0_pick",
+            "anchor": "optional",
+            "anchor_distance": 0,
+            "arguments": {"prompt": "pick up the bowl"},
+        },
+        {"action": "release", "arguments": {}},
+    ]
+    out = replay_with_evolution(
+        tk, None, {"plan": plan, "reference": {}, "locator_of": {}}
+    )
+    assert out["mode"] == "flash_fast" and out["done"]
+    assert [name for name, _ in tk.executed] == [entry["action"] for entry in plan]
+
+
 def test_recovery_uses_its_observed_anchor_and_recorded_grasp(tmp_path: Path) -> None:
     from robots.libero.flash.replay import replay_with_evolution
 
@@ -347,6 +480,50 @@ def test_bootstrap_and_fast_zero_token_solve(
     moves = [args["xyz"] for name, args in tk.executed if name == "move_to"]
     assert moves[0][:2] == pytest.approx([0.18, -0.02], abs=1e-3)
     assert moves[1][:2] == pytest.approx(plate_xy, abs=1e-3)
+
+
+def test_anchor_preflight_learns_recovery_from_an_untouched_scene(tmp_path):
+    memory, store = tmp_path / "corpus", tmp_path / "flash_memory"
+    _write_seed0_task_specific(memory)
+    anchors = {"the black bowl": [0.1, 0.05, 0.5]}
+    first = FakeLiberoToolkit(
+        tmp_path / "first", memory_root=memory, anchors_xyz=anchors
+    )
+
+    def solve(message):
+        assert first.state.latest_step == 0 and not first._holding
+        assert "plan[0]" in message and "zero main plan actions" in message
+        first.execute_tool("pi0_pick", {"prompt": "pick up the black bowl"})
+        first.execute_tool("release", {})
+        return PlannerResult(finish_result={"status": "success"})
+
+    trace = run_flash_evolve(
+        first,
+        "spatial_task_t0_s1",
+        slow_solve=solve,
+        user_message="Task",
+        flash_memory_dir=store,
+    )["trace"]
+    assert trace["fast_actions"] == trace["handover_step"] == 0
+    assert (
+        trace["execution_mode"] == "slow_handover_rescue" and trace["patched_branch_id"]
+    )
+
+    second = FakeLiberoToolkit(
+        tmp_path / "second", memory_root=memory, anchors_xyz=anchors
+    )
+    out = run_flash_evolve(
+        second,
+        "spatial_task_t0_s2",
+        slow_solve=pytest.fail,
+        user_message="Task",
+        flash_memory_dir=store,
+    )
+    assert out["done"] and out["trace"]["execution_mode"] == "flash_branch"
+    assert [name for name, _ in second.executed if name != "segment"] == [
+        "pi0_pick",
+        "release",
+    ]
 
 
 def test_closed_loop_handover_patch_and_zero_token_branch_hit(tmp_path: Path) -> None:
